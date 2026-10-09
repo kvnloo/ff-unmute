@@ -40,7 +40,7 @@ impl Video for LensVideo {
     }
 
     fn audio(&self) -> AudioMap<'_> {
-        AudioMap::from([AudioTrack::new("sfx.wav", Second(0.)..Eof)])
+        AudioMap::from([AudioTrack::new("music.wav", Second(0.)..Eof)])
     }
 
     fn render_frame<'a>(&'a self, frame: Frame, ctx: &FFramesContext<'a, '_>) -> Svgr<'a> {
@@ -75,6 +75,8 @@ impl Video for LensVideo {
             .float3("uP3", p[3][0], p[3][1], p[3][2])
             .float3("uP4", p[4][0], p[4][1], p[4][2])
             .float("uLock", if s.lock { 1.0 } else { 0.0 })
+            .float("uPunch", s.punch)
+            .float("uTear", s.tear)
             .float("uCut", s.cut)
             .float("uOut", s.out)
             .float("uSeed", (si * 31 + f) as f32)
@@ -83,7 +85,7 @@ impl Video for LensVideo {
         fframes::svgr!(
             <svg xmlns="http://www.w3.org/2000/svg" width={WIDTH} height={HEIGHT}>
                 <image href={layer.href()} x="0" y="0" width={WIDTH} height={HEIGHT} />
-                {if stage() >= 4.0 { camera_tracker(&s, si, f) } else { Svgr::empty() }}
+                {if stage() >= 4.0 { camera_tracker(&s, frame.index) } else { Svgr::empty() }}
             </svg>
         )
     }
@@ -91,7 +93,10 @@ impl Video for LensVideo {
 
 /// `LENS_STAGE=0..3` renders the shader up to one step (see lens.sksl); unset = all.
 fn stage() -> f32 {
-    std::env::var("LENS_STAGE").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0)
+    std::env::var("LENS_STAGE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4.0)
 }
 
 const MONO: &str = "JetBrains Mono";
@@ -102,8 +107,9 @@ const RH: f32 = HEIGHT as f32;
 /// The camera's own tracker, drawn sharp over the filmed screen: links between the boxes,
 /// a dot running along each link, coordinate labels and brackets on the target. The
 /// numbers are the real pixel positions of the boxes in this frame.
-fn camera_tracker<'a>(s: &hud::Shot, si: usize, f: usize) -> Svgr<'a> {
-    let t = hud::track(si, f);
+fn camera_tracker<'a>(s: &hud::Shot, global: usize) -> Svgr<'a> {
+    let (_, f) = hud::split(global);
+    let t = hud::track(global);
     let ink = if s.palette == hud::Palette::Paper {
         "#141414"
     } else {
@@ -144,25 +150,33 @@ fn camera_tracker<'a>(s: &hud::Shot, si: usize, f: usize) -> Svgr<'a> {
         let (Some(c), Some(corner)) = (*c, proj(anchor)) else {
             continue;
         };
-        let y = if below { corner.1 + 24.0 } else { corner.1 - 9.0 };
+        let y = if below {
+            corner.1 + 24.0
+        } else {
+            corner.1 - 9.0
+        };
         let free = b.locked
-            || taken.iter().all(|(tx, ty)| (tx - corner.0).abs() > 190.0 || (ty - y).abs() > 26.0);
+            || taken
+                .iter()
+                .all(|(tx, ty)| (tx - corner.0).abs() > 190.0 || (ty - y).abs() > 26.0);
         let color = if b.locked { LOCK_RED } else { ink };
         items.push(fframes::svgr!(<circle cx={c.0} cy={c.1} r="3.2" fill={color} />));
         if !free {
             continue;
         }
         taken.push((corner.0, y));
-        let label = if b.locked {
-            format!("LOCK x: {:.0} y: {:.0}", c.0, c.1)
-        } else {
-            format!("x: {:.0} y: {:.0}", c.0, c.1)
+        // A measured value when the box has one, else its real pixel position.
+        let label = match (&b.value, b.locked) {
+            (Some(v), true) => format!("LOCK {v}"),
+            (Some(v), false) => v.clone(),
+            (None, true) => format!("LOCK x: {:.0} y: {:.0}", c.0, c.1),
+            (None, false) => format!("x: {:.0} y: {:.0}", c.0, c.1),
         };
         items.push(fframes::svgr!(<text x={corner.0} y={y} font-family={MONO} font-weight="400" font-size="19" fill={color}>{label}</text>));
     }
 
     // Brackets around the target box, in screen space.
-    if let Some(b) = t.boxes.last() {
+    if let Some(b) = t.boxes.get(t.target) {
         let corners = [
             (b.x, b.y),
             (b.x + b.w, b.y),

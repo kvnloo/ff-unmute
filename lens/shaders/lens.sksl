@@ -18,6 +18,8 @@ uniform float3 uP2;
 uniform float3 uP3;
 uniform float3 uP4;
 uniform float uLock;
+uniform float uPunch;   // kick envelope 0..1
+uniform float uTear;    // clap and stutter 0..1
 uniform float uCut;
 uniform float uOut;
 uniform float uSeed;
@@ -66,7 +68,7 @@ half4 main(float2 coord) {
 
     // Tear: on a lock and right after a cut, a few rows slide sideways.
     float2 px = coord;
-    float shake = uLock + uCut;
+    float shake = uLock + uCut + uTear;
     if (shake > 0.0 && uStage >= 4.0) {
         float band = floor(coord.y / 16.0);
         float n = hash(float2(band, frameSeed.x * 3.7 + frameSeed.y));
@@ -144,7 +146,7 @@ half4 main(float2 coord) {
     glow /= float(GLOW_TAPS);
     glowRed /= float(GLOW_TAPS);
     float glowOn = step(3.0, uStage);
-    col += pal(min(1.0, glow * 1.6)) * glow * 0.75 * glowOn;
+    col += pal(min(1.0, glow * 1.6)) * glow * (0.75 + 0.45 * uPunch) * glowOn;
     col += float3(1.0, 0.1, 0.05) * glowRed * 0.9 * glowOn;
 
     // LED grid on the screen surface; it fades out of focus and where cells get too small.
@@ -161,7 +163,7 @@ half4 main(float2 coord) {
 
     // Exposure kick on a cut, vignette, rolling flicker, grain, final fade.
     float post = step(4.0, uStage);
-    col = col * (1.0 + uCut * 1.1 * post) + uCut * 0.06 * post;
+    col = col * (1.0 + (uCut * 1.1 + uPunch * 0.18) * post) + uCut * 0.06 * post;
     float2 v = s * float2(0.85, 1.15);
     col *= 1.0 - 0.42 * dot(v, v) * post;
     col *= 1.0 - post * (0.035 - 0.035 * sin(coord.y * 0.9 - iTime * 55.0));

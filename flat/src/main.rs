@@ -1,4 +1,7 @@
-use fframes::{EncoderOptions, RenderOptions, StaticMediaProvider, cli};
+use fframes::{
+    CombinedMediaProvider, EncoderOptions, MediaDirectory, MediaProvider, RenderOptions,
+    StaticMediaProvider, cli,
+};
 use fframes_skia_renderer::{
     SkiaFFramesRenderer, SkiaPipelineConcurrencyPolicy, SkiaPipelineConfig, metal::SkiaMetalCtx,
 };
@@ -6,7 +9,11 @@ use flat::{FlatMedia, FlatVideo, HEIGHT, WIDTH};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let media = FlatMedia::prepare().expect("media");
+    let fonts = FlatMedia::prepare().expect("media");
+    // music.wav (from music/synth.py) feeds the spectrum panel.
+    let dir = MediaDirectory::read_folder("out/pass").expect("out/pass: run music/synth.py first");
+    let pass = dir.process_media_source().expect("out/pass media");
+    let media = CombinedMediaProvider::from([&fonts as &dyn MediaProvider, &pass]);
     let video = FlatVideo::new();
     let gpu = SkiaMetalCtx::new(WIDTH, HEIGHT).expect("GPU context");
 

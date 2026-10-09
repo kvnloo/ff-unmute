@@ -1,35 +1,44 @@
-//! Shared data of both passes: what the agent types, where the tracker boxes sit and where
-//! the camera looks. `flat` draws it, `lens` films it, `tracks` (bin) exports the sound events.
+//! Shared data of both passes for ff-unmute: the shots, the tracker and the camera, all
+//! driven by the music. `generated.rs` (from music/gen_hud.py) holds the measured events.
 //!
 //! Every position is in the flat pass's logical space, `W` x `H`.
+
+mod generated;
+pub use generated::*;
 
 pub const FPS: usize = 30;
 pub const W: f32 = 1920.0;
 pub const H: f32 = 1080.0;
-pub const SCENE_FRAMES: usize = 15;
-pub const SCENES: usize = 12;
-pub const TOTAL_FRAMES: usize = SCENE_FRAMES * SCENES;
-
-/// Typing runs until this scene frame; the newest box locks right after.
-pub const TYPE_END: usize = 8;
-pub const LOCK_AT: usize = 9;
-pub const LOCK_FRAMES: usize = 2;
-/// Share of the line already on screen at the cut, so every shot opens with something to track.
-const TYPED_AT_CUT: f32 = 0.35;
-/// Boxes on the newest characters.
-const CHAIN: usize = 5;
+pub const SHOTS: usize = 22;
+pub const TOTAL_FRAMES: usize = LENGTH_FRAMES;
 
 /// JetBrains Mono advances 0.6 em per character.
 pub const MONO_ADV: f32 = 0.6;
-pub const LOG_SIZE: f32 = 26.0;
-pub const LOG_LINE: f32 = 46.0;
+pub const LOG_SIZE: f32 = 24.0;
+pub const LOG_LINE: f32 = 40.0;
 pub const LOG_X: f32 = 150.0;
+pub const LOG_TOP: f32 = 96.0;
+pub const LOG_ROWS: usize = 15;
+
+/// Spectrum panel: log-frequency axis from SPEC_LO to SPEC_HI Hz.
+pub const SPEC_X0: f32 = 150.0;
+pub const SPEC_X1: f32 = 1770.0;
+pub const SPEC_TOP: f32 = 760.0;
+pub const SPEC_BASE: f32 = 990.0;
+pub const SPEC_LO: f32 = 40.0;
+pub const SPEC_HI: f32 = 16_000.0;
+pub const SPEC_BANDS: usize = 56;
+
+/// Newest characters with a box on them.
+const CHAIN: usize = 4;
+/// A lock lasts this many frames from the kick.
+pub const LOCK_FRAMES: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
-    Cursor,
+    Listen,
     Typing,
-    Collapse,
+    Hold,
     Done,
 }
 
@@ -70,28 +79,24 @@ impl Palette {
 /// Virtual camera filming the flat screen. Angles in radians, zoom 1 shows the whole screen.
 #[derive(Clone, Copy, Debug)]
 pub struct Cam {
-    /// Pitch: positive tips the top of the screen away.
     pub tilt_x: f32,
-    /// Yaw: positive turns the right side away.
     pub tilt_y: f32,
     pub roll: f32,
     pub zoom: (f32, f32),
-    /// Drift of the aim point over the shot, logical px.
     pub pan: (f32, f32),
-    /// Depth of field strength, 1 = normal.
     pub blur: f32,
-    /// Hand-held shake, logical px.
-    pub shake: f32,
 }
 
-pub struct SceneDef {
+/// What a shot looks like; its timing and text come from `generated.rs`.
+pub struct Look {
     pub kind: Kind,
-    pub text: &'static str,
     pub palette: Palette,
     pub cam: Cam,
     /// Baseline start of the hero line.
     pub hero: (f32, f32),
     pub size: f32,
+    /// Track a frequency on the spectrum instead of the newest glyph (Hz).
+    pub track_hz: Option<f32>,
 }
 
 const fn cam(
@@ -111,153 +116,232 @@ const fn cam(
         zoom: (z0, z1),
         pan: (px, py),
         blur,
-        shake: 0.0,
     }
 }
 
-pub const SCENE_LIST: [SceneDef; SCENES] = [
-    SceneDef {
-        kind: Kind::Cursor,
-        text: "›",
-        palette: Palette::Paper,
-        cam: cam(0.18, 0.62, -0.05, 3.3, 3.7, 10.0, 0.0, 1.1),
-        hero: (720.0, 560.0),
-        size: 120.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "thinking…",
-        palette: Palette::Thermal,
-        cam: cam(0.38, -0.22, 0.04, 2.5, 2.8, 50.0, 0.0, 1.2),
-        hero: (560.0, 540.0),
-        size: 104.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "reading 14 files",
-        palette: Palette::Mono,
-        cam: cam(0.12, -0.55, 0.06, 2.1, 2.3, 60.0, -10.0, 1.0),
-        hero: (330.0, 600.0),
-        size: 84.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "src/render.rs",
-        palette: Palette::Mono,
-        cam: cam(-0.12, 0.5, -0.03, 2.7, 2.7, 0.0, 0.0, 1.7),
-        hero: (420.0, 480.0),
-        size: 92.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "tool_call: render_frame()",
-        palette: Palette::Phosphor,
-        cam: cam(0.78, 0.1, -0.12, 1.9, 2.2, 30.0, 0.0, 1.2),
-        hero: (230.0, 560.0),
-        size: 64.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "attention → token 4812",
-        palette: Palette::Thermal,
-        cam: cam(0.26, -0.36, 0.0, 1.6, 3.1, 0.0, 0.0, 1.0),
-        hero: (250.0, 540.0),
-        size: 72.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "not just completing —",
-        palette: Palette::Mono,
-        cam: cam(0.2, 0.32, 0.05, 2.3, 2.3, -170.0, 0.0, 1.1),
-        hero: (230.0, 520.0),
-        size: 76.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "— composing",
-        palette: Palette::Amber,
-        cam: cam(0.32, -0.26, -0.02, 3.1, 2.1, 0.0, 0.0, 1.3),
-        hero: (560.0, 560.0),
-        size: 112.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "verifying 180 frames",
-        palette: Palette::Navy,
-        cam: Cam {
-            tilt_x: 0.15,
-            tilt_y: -0.16,
-            roll: 0.0,
-            zoom: (2.05, 2.1),
-            pan: (0.0, 0.0),
-            blur: 0.8,
-            shake: 4.0,
-        },
-        hero: (300.0, 520.0),
-        size: 74.0,
-    },
-    SceneDef {
-        kind: Kind::Typing,
-        text: "✓ 0 problems",
-        palette: Palette::Phosphor,
-        cam: cam(0.22, 0.62, -0.08, 2.5, 2.7, 20.0, 0.0, 1.2),
-        hero: (500.0, 560.0),
-        size: 100.0,
-    },
-    SceneDef {
-        kind: Kind::Collapse,
-        text: "",
-        palette: Palette::Thermal,
-        cam: cam(0.3, 0.2, 0.03, 1.35, 2.7, 0.0, 0.0, 1.0),
-        hero: (960.0, 540.0),
-        size: 80.0,
-    },
-    SceneDef {
-        kind: Kind::Done,
-        text: "Done",
-        palette: Palette::Neon,
-        cam: cam(0.46, -0.32, 0.06, 3.0, 1.9, 0.0, 0.0, 1.2),
-        hero: (960.0, 540.0),
-        size: 80.0,
-    },
-];
-
-/// Dim agent log behind the hero line; each scene scrolls it by a few rows.
-pub const LOG: [&str; 24] = [
-    "› plan  1/4  map the request to scenes",
-    "  read  src/lib.rs              412 lines",
-    "  read  src/render.rs           188 lines",
-    "  grep  \"render_frame\"         9 matches",
-    "› think  boxes must follow real glyphs",
-    "  tool  measure_text(\"JetBrains Mono\")",
-    "  ok    advance 0.6 em",
-    "  read  shaders/lens.sksl        96 lines",
-    "› plan  2/4  camera, focus, palette",
-    "  tool  render_frame(42)        12 ms",
-    "  tool  render_frame(43)        11 ms",
-    "  warn  focus drifted 3 px, correcting",
-    "  ok    lock  x: 1180 y: 512",
-    "› think  not just completing — composing",
-    "  read  scenes.rs               210 lines",
-    "  tool  inspect --all-frames",
-    "  ok    0 problems",
-    "› plan  3/4  sound on every lock",
-    "  tool  sfx.synth(beep, 1760 Hz)",
-    "  ok    -14.0 LUFS",
-    "› plan  4/4  verify, deliver",
-    "  tool  ffprobe out/tracking.mp4",
-    "  ok    180 frames  6.0 s",
-    "› done",
-];
-
-pub fn scene(i: usize) -> &'static SceneDef {
-    &SCENE_LIST[i.min(SCENES - 1)]
+const fn look(kind: Kind, palette: Palette, cam: Cam, hero: (f32, f32), size: f32) -> Look {
+    Look {
+        kind,
+        palette,
+        cam,
+        hero,
+        size,
+        track_hz: None,
+    }
 }
 
-/// Scene index and frame inside it for a video frame.
+const fn on_hz(
+    kind: Kind,
+    palette: Palette,
+    cam: Cam,
+    hero: (f32, f32),
+    size: f32,
+    hz: f32,
+) -> Look {
+    Look {
+        kind,
+        palette,
+        cam,
+        hero,
+        size,
+        track_hz: Some(hz),
+    }
+}
+
+use Kind::*;
+use Palette::*;
+
+pub const LOOKS: [Look; SHOTS] = [
+    // bars 1-2: listening, slow
+    look(
+        Listen,
+        Mono,
+        cam(0.30, 0.42, -0.04, 1.6, 2.1, 80.0, 0.0, 1.0),
+        (560.0, 520.0),
+        120.0,
+    ),
+    look(
+        Listen,
+        Navy,
+        cam(0.18, -0.38, 0.03, 1.9, 2.3, -60.0, 0.0, 1.0),
+        (420.0, 520.0),
+        100.0,
+    ),
+    // bars 3-4: the kick arrives
+    look(
+        Typing,
+        Thermal,
+        cam(0.34, -0.24, 0.04, 2.3, 2.6, 40.0, 0.0, 1.2),
+        (420.0, 500.0),
+        112.0,
+    ),
+    on_hz(
+        Typing,
+        Thermal,
+        cam(0.62, 0.12, -0.08, 2.0, 2.3, 0.0, 0.0, 1.3),
+        (460.0, 500.0),
+        108.0,
+        KICK_HZ,
+    ),
+    look(
+        Typing,
+        Phosphor,
+        cam(0.14, 0.55, -0.05, 2.2, 2.5, 30.0, 0.0, 1.1),
+        (300.0, 520.0),
+        100.0,
+    ),
+    on_hz(
+        Typing,
+        Phosphor,
+        cam(0.70, -0.20, 0.06, 1.9, 2.2, -20.0, 0.0, 1.2),
+        (420.0, 500.0),
+        108.0,
+        BASS_HZ,
+    ),
+    // bars 5-6: a cut per beat
+    look(
+        Typing,
+        Amber,
+        cam(0.28, -0.50, 0.05, 2.6, 2.8, 0.0, 0.0, 1.2),
+        (330.0, 520.0),
+        104.0,
+    ),
+    look(
+        Typing,
+        Amber,
+        cam(0.20, 0.48, -0.06, 3.0, 3.2, 0.0, 0.0, 1.3),
+        (620.0, 520.0),
+        120.0,
+    ),
+    look(
+        Typing,
+        Thermal,
+        cam(0.40, 0.10, 0.02, 2.6, 2.9, 20.0, 0.0, 1.1),
+        (520.0, 520.0),
+        116.0,
+    ),
+    on_hz(
+        Typing,
+        Thermal,
+        cam(0.66, -0.30, -0.04, 2.1, 2.4, 0.0, 0.0, 1.3),
+        (420.0, 500.0),
+        104.0,
+        880.0,
+    ),
+    look(
+        Typing,
+        Navy,
+        cam(0.22, -0.40, 0.04, 3.0, 3.2, 0.0, 0.0, 1.2),
+        (620.0, 520.0),
+        120.0,
+    ),
+    look(
+        Typing,
+        Mono,
+        cam(0.10, 0.52, -0.03, 2.4, 2.6, 30.0, 0.0, 1.1),
+        (260.0, 520.0),
+        96.0,
+    ),
+    look(
+        Typing,
+        Phosphor,
+        cam(0.36, -0.18, 0.05, 2.5, 2.7, 0.0, 0.0, 1.2),
+        (300.0, 520.0),
+        100.0,
+    ),
+    look(
+        Typing,
+        Thermal,
+        cam(0.24, 0.40, -0.05, 2.7, 3.0, 0.0, 0.0, 1.2),
+        (420.0, 520.0),
+        112.0,
+    ),
+    // bar 7: an 8th per shot, closer every time
+    look(
+        Typing,
+        Phosphor,
+        cam(0.30, -0.45, 0.06, 3.0, 3.2, 0.0, 0.0, 1.3),
+        (640.0, 520.0),
+        130.0,
+    ),
+    look(
+        Typing,
+        Thermal,
+        cam(0.30, 0.45, -0.06, 3.1, 3.3, 0.0, 0.0, 1.3),
+        (640.0, 520.0),
+        130.0,
+    ),
+    look(
+        Typing,
+        Amber,
+        cam(0.50, -0.30, 0.04, 3.2, 3.4, 0.0, 0.0, 1.3),
+        (580.0, 520.0),
+        130.0,
+    ),
+    look(
+        Typing,
+        Navy,
+        cam(0.50, 0.30, -0.04, 3.3, 3.5, 0.0, 0.0, 1.4),
+        (640.0, 520.0),
+        130.0,
+    ),
+    look(
+        Typing,
+        Paper,
+        cam(0.20, -0.20, 0.08, 3.4, 3.6, 0.0, 0.0, 1.4),
+        (640.0, 520.0),
+        130.0,
+    ),
+    look(
+        Typing,
+        Thermal,
+        cam(0.20, 0.20, -0.08, 3.6, 4.0, 0.0, 0.0, 1.5),
+        (760.0, 520.0),
+        140.0,
+    ),
+    // bar 7 beat 4: the held breath
+    look(
+        Hold,
+        Mono,
+        cam(0.40, 0.00, 0.00, 2.4, 2.2, 0.0, 0.0, 1.8),
+        (900.0, 520.0),
+        120.0,
+    ),
+    // bar 8: impact, collapse, unmuted
+    look(
+        Done,
+        Neon,
+        cam(0.44, -0.30, 0.05, 3.2, 2.0, 0.0, 0.0, 1.2),
+        (960.0, 540.0),
+        80.0,
+    ),
+];
+
+/// Shot index and frame inside it for a video frame.
 pub fn split(global: usize) -> (usize, usize) {
     let g = global.min(TOTAL_FRAMES - 1);
-    (g / SCENE_FRAMES, g % SCENE_FRAMES)
+    let si = (0..SHOTS).rfind(|&i| SHOT_FRAMES[i] <= g).unwrap_or(0);
+    (si, g - SHOT_FRAMES[si])
+}
+
+pub fn shot_len(si: usize) -> usize {
+    SHOT_FRAMES[si + 1] - SHOT_FRAMES[si]
+}
+
+pub fn look_of(si: usize) -> &'static Look {
+    &LOOKS[si.min(SHOTS - 1)]
+}
+
+pub fn text(si: usize) -> &'static str {
+    SHOT_TEXT[si.min(SHOTS - 1)]
+}
+
+pub fn seconds(global: usize) -> f32 {
+    global as f32 / FPS as f32
+}
+
+pub fn frame_of(t: f32) -> usize {
+    (t * FPS as f32).round() as usize
 }
 
 /// Deterministic noise in 0..1.
@@ -271,18 +355,62 @@ pub fn rnd(a: u32, b: u32) -> f32 {
     h as f32 / u32::MAX as f32
 }
 
-fn chars(s: &SceneDef) -> Vec<char> {
-    s.text.chars().collect()
+/// x of a frequency on the spectrum panel.
+pub fn hz_x(hz: f32) -> f32 {
+    let p = (hz.max(SPEC_LO) / SPEC_LO).ln() / (SPEC_HI / SPEC_LO).ln();
+    SPEC_X0 + p.clamp(0.0, 1.0) * (SPEC_X1 - SPEC_X0)
 }
 
-/// Characters of the hero line on screen at scene frame `f`.
+/// Envelope of the most recent event before `t` with an exponential decay.
+fn env(events: &[f32], t: f32, decay: f32) -> f32 {
+    events
+        .iter()
+        .filter(|&&e| e <= t + 1e-4)
+        .map(|&e| (-(t - e) / decay).exp())
+        .fold(0.0, f32::max)
+}
+
+pub fn kick_env(t: f32) -> f32 {
+    env(&KICKS, t, 0.12).max(env(&[IMPACT], t, 0.35))
+}
+
+pub fn clap_env(t: f32) -> f32 {
+    env(&CLAPS, t, 0.07)
+}
+
+pub fn stutter_on(t: f32) -> bool {
+    STUTTERS.iter().any(|&s| t >= s && t < s + 0.25)
+}
+
+/// Frames at which a kick (or the impact) lands.
+pub fn is_lock(global: usize) -> bool {
+    KICKS.iter().chain([IMPACT].iter()).any(|&k| {
+        let f = frame_of(k);
+        global >= f && global < f + LOCK_FRAMES
+    })
+}
+
+fn last_lock_before(global: usize) -> Option<usize> {
+    KICKS
+        .iter()
+        .chain([IMPACT].iter())
+        .map(|&k| frame_of(k))
+        .filter(|&f| f <= global)
+        .max()
+}
+
+fn chars(si: usize) -> Vec<char> {
+    text(si).chars().collect()
+}
+
+/// Characters of the hero line on screen at shot frame `f`: types in the first half.
 pub fn visible(si: usize, f: usize) -> usize {
-    let s = scene(si);
-    let n = chars(s).len();
-    match s.kind {
-        Kind::Typing => {
-            let p = (f as f32 / TYPE_END as f32).min(1.0);
-            ((n as f32) * (TYPED_AT_CUT + (1.0 - TYPED_AT_CUT) * p)).ceil() as usize
+    let n = chars(si).len();
+    let l = look_of(si);
+    match l.kind {
+        Listen | Typing => {
+            let p = (f as f32 / (shot_len(si) as f32 * 0.5).max(1.0)).min(1.0);
+            ((n as f32) * (0.3 + 0.7 * p)).ceil() as usize
         }
         _ => n,
     }
@@ -291,42 +419,34 @@ pub fn visible(si: usize, f: usize) -> usize {
 
 /// Cell of character `i` of the hero line: x, y (top), w, h.
 pub fn cell(si: usize, i: usize) -> (f32, f32, f32, f32) {
-    let s = scene(si);
-    let adv = s.size * MONO_ADV;
+    let l = look_of(si);
+    let adv = l.size * MONO_ADV;
     (
-        s.hero.0 + i as f32 * adv,
-        s.hero.1 - s.size * 0.78,
+        l.hero.0 + i as f32 * adv,
+        l.hero.1 - l.size * 0.78,
         adv,
-        s.size * 0.98,
+        l.size * 0.98,
     )
 }
 
-/// Rows of the log for a scene: (text, x, baseline y). Rows close to the hero line are left out.
-pub fn log_rows(si: usize) -> Vec<(&'static str, f32, f32)> {
-    let s = scene(si);
-    let top = 70.0;
-    let mut rows = vec![];
-    for r in 0..24usize {
-        let y = top + r as f32 * LOG_LINE;
-        if y > H - 40.0 {
-            break;
-        }
-        if s.kind != Kind::Collapse
-            && (y - s.hero.1).abs() < s.size * 0.95 + 10.0
-            && y < s.hero.1 + 30.0
-        {
-            continue;
-        }
-        if s.kind != Kind::Collapse && y > s.hero.1 && y - s.hero.1 < 40.0 {
-            continue;
-        }
-        let line = LOG[(r + si * 2) % LOG.len()];
-        rows.push((line, LOG_X, y));
-    }
-    rows
+/// The agent's log on screen at a video frame: (text, x, baseline y), newest at the bottom.
+pub fn log_rows(global: usize) -> Vec<(&'static str, f32, f32)> {
+    let t = seconds(global);
+    let heard: Vec<&'static str> = LOG
+        .iter()
+        .filter(|(lt, _)| *lt <= t)
+        .map(|(_, s)| *s)
+        .collect();
+    let from = heard.len().saturating_sub(LOG_ROWS);
+    heard[from..]
+        .iter()
+        .enumerate()
+        .map(|(r, s)| (*s, LOG_X, LOG_TOP + r as f32 * LOG_LINE))
+        .filter(|(_, _, y)| (*y - 520.0).abs() > 110.0 || *y < 300.0)
+        .collect()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TrackBox {
     pub x: f32,
     pub y: f32,
@@ -334,6 +454,8 @@ pub struct TrackBox {
     pub h: f32,
     pub hatch: bool,
     pub locked: bool,
+    /// A measured value the camera writes next to the box (e.g. "55.7 Hz").
+    pub value: Option<String>,
 }
 
 impl TrackBox {
@@ -343,9 +465,9 @@ impl TrackBox {
 }
 
 pub struct Track {
-    /// Boxes in chain order; the last one is the current target.
+    /// Boxes in chain order; the focus is on `target`.
     pub boxes: Vec<TrackBox>,
-    /// Extra lines from a box to a far point (off the screen in most shots).
+    pub target: usize,
     pub tails: Vec<((f32, f32), (f32, f32))>,
     pub focus: (f32, f32),
     pub lock: bool,
@@ -367,62 +489,52 @@ fn boxed(x: f32, y: f32, w: f32, h: f32, pad: f32, j: (f32, f32), hatch: bool) -
         h: h + 2.0 * pad,
         hatch,
         locked: false,
+        value: None,
     }
 }
 
-/// Icon squares in the log gutter, as anchors for the tracker: (x, y, size).
-pub fn icons(si: usize) -> Vec<(f32, f32, f32)> {
-    log_rows(si)
-        .iter()
-        .enumerate()
-        .filter(|(r, _)| rnd(si as u32 + 50, *r as u32) > 0.62)
-        .map(|(_, (_, _, y))| (LOG_X - 64.0, y - 24.0, 30.0))
-        .collect()
+fn spectrum_box(hz: f32, j: (f32, f32), value: bool) -> TrackBox {
+    let x = hz_x(hz);
+    let mut b = boxed(
+        x - 16.0,
+        SPEC_TOP + 30.0,
+        32.0,
+        SPEC_BASE - SPEC_TOP - 40.0,
+        0.0,
+        j,
+        true,
+    );
+    if value {
+        b.value = Some(format!("{hz:.1} Hz"));
+    }
+    b
 }
 
-pub fn track(si: usize, f: usize) -> Track {
-    let s = scene(si);
-    let lock = (LOCK_AT..LOCK_AT + LOCK_FRAMES).contains(&f);
+pub fn track(global: usize) -> Track {
+    let (si, f) = split(global);
+    let l = look_of(si);
+    let t = seconds(global);
+    let lock = is_lock(global);
     let mut boxes = vec![];
-    let mut tails = vec![];
+    let mut target = 0;
 
-    // Two anchors on gutter icons near the hero line start every chain.
-    let mut anchors: Vec<(f32, f32, f32)> = icons(si);
-    anchors.sort_by(|a, b| (a.1 - s.hero.1).abs().total_cmp(&(b.1 - s.hero.1).abs()));
-    anchors.truncate(2);
-    if matches!(s.kind, Kind::Cursor | Kind::Typing) {
-        for (k, (x, y, sz)) in anchors.iter().enumerate() {
-            boxes.push(boxed(
-                *x,
-                *y,
-                *sz,
-                *sz,
-                5.0,
-                jitter(si, f, 90 + k, 1.2),
-                k == 0,
-            ));
-        }
-    }
-
-    match s.kind {
-        Kind::Typing => {
-            let ch = chars(s);
+    match l.kind {
+        Listen | Typing => {
+            let ch = chars(si);
             let n = visible(si, f);
             let idx: Vec<usize> = (0..n).filter(|&i| !ch[i].is_whitespace()).collect();
             let from = idx.len().saturating_sub(CHAIN);
             for (k, &i) in idx[from..].iter().enumerate() {
                 let (x, y, w, h) = cell(si, i);
-                let span = if rnd(si as u32, i as u32 + 7) > 0.7 && i + 1 < n {
-                    2.0
-                } else {
-                    1.0
-                };
                 let pad = 2.0 + rnd(si as u32 + 3, i as u32) * 8.0;
                 let hatch = rnd(si as u32 + 9, i as u32) > 0.35;
-                boxes.push(boxed(x, y, w * span, h, pad, jitter(si, f, k, 1.6), hatch));
+                boxes.push(boxed(x, y, w, h, pad, jitter(si, f, k, 1.6), hatch));
             }
-            if f >= LOCK_AT {
-                // The newest box grows over the last word and locks on it.
+            // After a kick in this shot, the newest box holds the last word; red on the kick.
+            // In short shots (bar 7) the word box shows only while it is locked, so the word stays readable.
+            let persist = shot_len(si) >= 15 || lock;
+            if let Some(lf) = last_lock_before(global).filter(|&lf| lf >= SHOT_FRAMES[si] && persist) {
+                let _ = lf;
                 let last_word_start = (0..n)
                     .rev()
                     .take_while(|&i| !ch[i].is_whitespace())
@@ -435,95 +547,109 @@ pub fn track(si: usize, f: usize) -> Track {
                     b.locked = lock;
                 }
             }
+            target = boxes.len().saturating_sub(1);
         }
-        Kind::Cursor => {
+        Hold => {
             let (x, y, w, h) = cell(si, 0);
-            boxes.push(boxed(x, y, w, h, 6.0, jitter(si, f, 1, 1.5), false));
-            let (cx, cy, cw, ch) = cell(si, 2);
-            let mut b = boxed(cx, cy, cw * 0.8, ch, 8.0, jitter(si, f, 2, 1.5), true);
-            b.locked = lock;
-            boxes.push(b);
+            boxes.push(boxed(x, y, w * 0.8, h, 8.0, jitter(si, f, 1, 0.6), false));
         }
-        Kind::Collapse => {
-            // Fourteen boxes spread over the log fall into one point and lock as a single box.
-            let p = ease_in_out((f as f32 / 11.0).min(1.0));
-            let c = s.hero;
-            for k in 0..14usize {
-                let sx = 120.0 + rnd(77, k as u32) * (W - 240.0);
-                let sy = 90.0 + rnd(78, k as u32) * (H - 180.0);
-                let sw = 30.0 + rnd(79, k as u32) * 90.0;
-                let sh = 26.0 + rnd(80, k as u32) * 60.0;
-                let x = sx + (c.0 - 40.0 - sx) * p;
-                let y = sy + (c.1 - 40.0 - sy) * p;
-                let w = sw + (80.0 - sw) * p;
-                let h = sh + (80.0 - sh) * p;
-                let mut b = boxed(
-                    x,
-                    y,
-                    w,
-                    h,
-                    0.0,
-                    jitter(si, f, k, 2.5 * (1.0 - p)),
-                    rnd(81, k as u32) > 0.4,
-                );
-                b.locked = lock;
-                boxes.push(b);
-            }
-            if p >= 1.0 {
-                boxes.truncate(1);
-                boxes[0] = boxed(
-                    c.0 - 40.0,
-                    c.1 - 40.0,
-                    80.0,
-                    80.0,
-                    0.0,
-                    jitter(si, f, 3, 1.0),
-                    true,
-                );
-                boxes[0].locked = lock;
-            }
-        }
-        Kind::Done => {
-            let (ix, iy) = done_icon();
-            boxes.push(boxed(
-                ix - 38.0,
-                iy - 32.0,
-                76.0,
-                64.0,
-                0.0,
-                jitter(si, f, 1, 1.2),
-                true,
-            ));
-            let (dx, dy) = done_label();
-            let mut b = boxed(dx + 1.0, dy - 62.0, 44.0, 70.0, 3.0, jitter(si, f, 2, 1.2), false);
-            b.locked = lock;
-            boxes.push(b);
+        Done => {}
+    }
+
+    // Spectrum: the tracked frequency, every kick and every bleep of the last 6 frames.
+    if let Some(hz) = l.track_hz {
+        let mut b = spectrum_box(hz, jitter(si, f, 50, 1.0), true);
+        b.locked = lock;
+        boxes.push(b);
+        target = boxes.len() - 1;
+    } else if lock && l.kind != Done {
+        boxes.push(spectrum_box(KICK_HZ, jitter(si, f, 51, 1.0), true));
+    }
+    for (k, (bt, hz)) in BLEEPS.iter().enumerate() {
+        if *bt <= t && t - *bt < 6.0 / FPS as f32 {
+            boxes.push(spectrum_box(*hz, jitter(si, f, 60 + k, 1.4), true));
         }
     }
 
+    // Tokens: a small box on a glyph of the log for 3 frames.
+    let rows = log_rows(global);
+    if !rows.is_empty() {
+        for (k, tt) in TOKENS.iter().enumerate() {
+            if *tt <= t && t - *tt < 3.0 / FPS as f32 {
+                let (s, x, y) = rows[k % rows.len()];
+                let col = (k * 7) % s.chars().count().max(1);
+                let adv = LOG_SIZE * MONO_ADV;
+                boxes.push(boxed(
+                    x + col as f32 * adv,
+                    y - LOG_SIZE * 0.8,
+                    adv,
+                    LOG_SIZE,
+                    3.0,
+                    (0.0, 0.0),
+                    k % 2 == 0,
+                ));
+            }
+        }
+    }
+
+    if l.kind == Done {
+        boxes = done_boxes(f);
+        target = boxes.len().saturating_sub(1);
+        if let Some(b) = boxes.last_mut() {
+            b.locked = lock;
+        }
+    }
+
+    let mut tails = vec![];
     if let Some(first) = boxes.first() {
         let c = first.center();
         let a = rnd(si as u32 + 200, 1) * std::f32::consts::TAU;
         tails.push((c, (c.0 + a.cos() * 2600.0, c.1 + a.sin() * 2600.0)));
     }
-    if let Some(last) = boxes.last() {
-        let c = last.center();
-        let a = rnd(si as u32 + 201, 2) * std::f32::consts::TAU;
-        tails.push((c, (c.0 + a.cos() * 2600.0, c.1 + a.sin() * 2600.0)));
-    }
-
-    let focus = boxes.last().map(|b| b.center()).unwrap_or(s.hero);
+    let focus = boxes.get(target).map(|b| b.center()).unwrap_or(l.hero);
     Track {
         boxes,
+        target,
         tails,
         focus,
         lock,
     }
 }
 
-/// Pill of the last scene: center x, y, width, height.
+/// The ending: twelve boxes fall into the centre in 10 frames, then the pill's two boxes.
+fn done_boxes(f: usize) -> Vec<TrackBox> {
+    let c = (960.0, 540.0);
+    let p = ease_in_out((f as f32 / 10.0).min(1.0));
+    if p < 1.0 {
+        return (0..12usize)
+            .map(|k| {
+                let sx = 160.0 + rnd(77, k as u32) * (W - 320.0);
+                let sy = 120.0 + rnd(78, k as u32) * (H - 240.0);
+                let sw = 30.0 + rnd(79, k as u32) * 90.0;
+                let sh = 26.0 + rnd(80, k as u32) * 60.0;
+                boxed(
+                    sx + (c.0 - 40.0 - sx) * p,
+                    sy + (c.1 - 40.0 - sy) * p,
+                    sw + (80.0 - sw) * p,
+                    sh + (80.0 - sh) * p,
+                    0.0,
+                    (0.0, 0.0),
+                    rnd(81, k as u32) > 0.4,
+                )
+            })
+            .collect();
+    }
+    let (ix, iy) = done_icon();
+    let (dx, dy) = done_label();
+    vec![
+        boxed(ix - 38.0, iy - 32.0, 76.0, 64.0, 0.0, (0.0, 0.0), true),
+        boxed(dx + 1.0, dy - 62.0, 44.0, 70.0, 3.0, (0.0, 0.0), false),
+    ]
+}
+
+/// Pill of the last shot: center x, y, width, height.
 pub fn done_pill() -> (f32, f32, f32, f32) {
-    (960.0, 540.0, 420.0, 132.0)
+    (960.0, 540.0, 560.0, 132.0)
 }
 
 pub fn done_icon() -> (f32, f32) {
@@ -531,10 +657,10 @@ pub fn done_icon() -> (f32, f32) {
     (cx - w * 0.5 + 92.0, cy)
 }
 
-/// Baseline start of "Done".
+/// Baseline start of "unmuted".
 pub fn done_label() -> (f32, f32) {
     let (cx, cy, _, _) = done_pill();
-    (cx - 40.0, cy + 28.0)
+    (cx - 110.0, cy + 28.0)
 }
 
 pub fn ease_in_out(t: f32) -> f32 {
@@ -563,58 +689,66 @@ pub struct Shot {
     pub lock: bool,
     /// Exposure kick right after a cut, 0..1.
     pub cut: f32,
-    /// Fade to black at the very end, 0..1 (1 = black).
+    /// Kick envelope 0..1 (zoom punch, exposure).
+    pub punch: f32,
+    /// Clap and stutter tear, 0..1.
+    pub tear: f32,
+    /// Fade to black at the end, 0..1.
     pub out: f32,
 }
 
 pub fn shot(global: usize) -> Shot {
     let (si, f) = split(global);
-    let s = scene(si);
-    let t = f as f32 / (SCENE_FRAMES - 1) as f32;
-    // The aim trails the target over the last four frames and leans to the hero line.
+    let l = look_of(si);
+    let t = seconds(global);
+    let len = shot_len(si);
+    let p = f as f32 / (len.max(2) - 1) as f32;
+    // The aim trails the target over four frames (within the shot) and leans to the hero line.
     let mut sum = (0.0, 0.0);
+    let mut n = 0.0;
     for k in 0..4 {
-        let p = track(si, f.saturating_sub(k)).focus;
-        sum.0 += p.0;
-        sum.1 += p.1;
+        if f >= k {
+            let q = track(global - k).focus;
+            sum.0 += q.0;
+            sum.1 += q.1;
+            n += 1.0;
+        }
     }
-    let lag = (sum.0 / 4.0, sum.1 / 4.0);
-    let hero_mid = match s.kind {
-        Kind::Typing | Kind::Cursor => {
+    let lag = (sum.0 / n, sum.1 / n);
+    let hero_mid = match l.kind {
+        Listen | Typing if l.track_hz.is_none() => {
             let (x, y, w, h) = cell(si, visible(si, f).saturating_sub(1) / 2);
             (x + w * 0.5, y + h * 0.5)
         }
-        _ => s.hero,
+        _ => lag,
     };
-    let sh = (
-        (rnd(si as u32 + 400, f as u32) - 0.5) * 2.0 * s.cam.shake,
-        (rnd(si as u32 + 401, f as u32) - 0.5) * 2.0 * s.cam.shake,
-    );
+    let punch = kick_env(t);
     let aim = (
-        lag.0 * 0.72 + hero_mid.0 * 0.28 + s.cam.pan.0 * (t - 0.5) + sh.0,
-        lag.1 * 0.72 + hero_mid.1 * 0.28 + s.cam.pan.1 * (t - 0.5) + sh.1,
+        lag.0 * 0.72 + hero_mid.0 * 0.28 + l.cam.pan.0 * (p - 0.5),
+        lag.1 * 0.72 + hero_mid.1 * 0.28 + l.cam.pan.1 * (p - 0.5),
     );
-    let zt = ease_out(t);
-    // A slow sway keeps every shot hand-held.
-    let sway = (si as f32 * 1.7 + t * 1.3).sin() * 0.015;
+    let sway = (si as f32 * 1.7 + p * 1.3).sin() * 0.015;
+    let zoom = (l.cam.zoom.0 + (l.cam.zoom.1 - l.cam.zoom.0) * ease_out(p)) * (1.0 + 0.06 * punch);
     Shot {
         aim,
-        focus: track(si, f).focus,
-        zoom: s.cam.zoom.0 + (s.cam.zoom.1 - s.cam.zoom.0) * zt,
-        tilt_x: s.cam.tilt_x + sway,
-        tilt_y: s.cam.tilt_y - sway * 0.7,
-        roll: s.cam.roll + sway * 0.4,
-        blur: s.cam.blur,
-        palette: s.palette,
-        lock: track(si, f).lock,
+        focus: track(global).focus,
+        zoom,
+        tilt_x: l.cam.tilt_x + sway,
+        tilt_y: l.cam.tilt_y - sway * 0.7,
+        roll: l.cam.roll + sway * 0.4,
+        blur: l.cam.blur,
+        palette: l.palette,
+        lock: is_lock(global),
         cut: match f {
             0 => 1.0,
             1 => 0.45,
             2 => 0.15,
             _ => 0.0,
         },
-        out: if si == SCENES - 1 {
-            ((f as f32 - 11.0) / 3.0).clamp(0.0, 1.0)
+        punch,
+        tear: clap_env(t).max(if stutter_on(t) { 0.8 } else { 0.0 }),
+        out: if si == SHOTS - 1 {
+            ((t - 15.3) / 0.6).clamp(0.0, 1.0)
         } else {
             0.0
         },
@@ -645,8 +779,7 @@ fn rotate(s: &Shot, v: V3) -> V3 {
     mat_mul_vec(&rz, mat_mul_vec(&ry, mat_mul_vec(&rx, v)))
 }
 
-/// Where a logical point of the flat screen lands in the lens output (`res_w` x `res_h`
-/// pixels). `None` when it is behind the camera.
+/// Where a logical point of the flat screen lands in the lens output. `None` behind the camera.
 pub fn project(s: &Shot, q: (f32, f32), res_w: f32, res_h: f32) -> Option<(f32, f32)> {
     let k = FOCAL * H / s.zoom;
     let (lx, ly) = ((q.0 - s.aim.0) / k, (q.1 - s.aim.1) / k);
@@ -660,46 +793,10 @@ pub fn project(s: &Shot, q: (f32, f32), res_w: f32, res_h: f32) -> Option<(f32, 
     if p[2] <= 0.05 {
         return None;
     }
-    let sx = FOCAL * p[0] / p[2];
-    let sy = FOCAL * p[1] / p[2];
-    Some((sx * res_h + 0.5 * res_w, sy * res_h + 0.5 * res_h))
-}
-
-/// Sound events, in video frames.
-pub struct Events {
-    pub cuts: Vec<usize>,
-    pub locks: Vec<usize>,
-    pub keys: Vec<usize>,
-    pub collapse: usize,
-    pub done: usize,
-}
-
-pub fn events() -> Events {
-    let mut e = Events {
-        cuts: vec![],
-        locks: vec![],
-        keys: vec![],
-        collapse: 0,
-        done: 0,
-    };
-    for si in 0..SCENES {
-        let g0 = si * SCENE_FRAMES;
-        e.cuts.push(g0);
-        e.locks.push(g0 + LOCK_AT);
-        if scene(si).kind == Kind::Typing {
-            for f in 1..=TYPE_END {
-                if visible(si, f) > visible(si, f - 1) {
-                    e.keys.push(g0 + f);
-                }
-            }
-        }
-        match scene(si).kind {
-            Kind::Collapse => e.collapse = g0,
-            Kind::Done => e.done = g0,
-            _ => {}
-        }
-    }
-    e
+    Some((
+        FOCAL * p[0] / p[2] * res_h + 0.5 * res_w,
+        FOCAL * p[1] / p[2] * res_h + 0.5 * res_h,
+    ))
 }
 
 #[cfg(test)]
@@ -707,15 +804,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_frame_has_a_target_on_the_canvas() {
-        for g in 0..TOTAL_FRAMES {
-            let s = shot(g);
+    fn timing_matches_the_music() {
+        assert_eq!(SHOT_FRAMES.len(), SHOTS + 1);
+        assert_eq!(SHOT_TEXT.len(), SHOTS);
+        assert_eq!(*SHOT_FRAMES.last().unwrap(), TOTAL_FRAMES);
+        // every cut lands on an 8th note (0.25 s = 7.5 frames, rounded)
+        for &f in &SHOT_FRAMES {
+            let beats = f as f32 / FPS as f32 / (60.0 / BPM) * 2.0;
             assert!(
-                s.focus.0 > 0.0 && s.focus.0 < W && s.focus.1 > 0.0 && s.focus.1 < H,
-                "frame {g}: {:?}",
-                s.focus
+                (beats - beats.round()).abs() < 0.07,
+                "cut at frame {f} is off the grid"
             );
-            assert!(!track(split(g).0, split(g).1).boxes.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_kick_is_a_lock() {
+        for &k in &KICKS {
+            assert!(is_lock(frame_of(k)), "kick at {k} s does not lock");
+            assert!(track(frame_of(k)).lock);
         }
     }
 
@@ -725,7 +832,7 @@ mod tests {
             let s = shot(g);
             let (x, y) = project(&s, s.focus, 1920.0, 1080.0).expect("in front of the camera");
             assert!(
-                x > 200.0 && x < 1720.0 && y > 150.0 && y < 930.0,
+                x > 150.0 && x < 1770.0 && y > 120.0 && y < 960.0,
                 "frame {g}: target at {x:.0},{y:.0}"
             );
         }
@@ -733,11 +840,11 @@ mod tests {
 
     #[test]
     fn hero_lines_fit_the_canvas() {
-        for si in 0..SCENES {
-            let n = scene(si).text.chars().count();
+        for si in 0..SHOTS {
+            let n = text(si).chars().count();
             if n > 0 {
                 let (x, _, w, _) = cell(si, n - 1);
-                assert!(x + w < W - 60.0, "scene {si} too wide");
+                assert!(x + w < W - 60.0, "shot {si} too wide");
             }
         }
     }
