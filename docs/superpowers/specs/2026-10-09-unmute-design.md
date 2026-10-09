@@ -73,3 +73,18 @@ The repo goes to GitHub after the video is approved.
 
 - Vocals, sampled instruments, third-party audio.
 - Changes to fframes itself (fframes#210 stays a separate track).
+
+## Revision, 2026-10-10: the playhead flight
+
+The first full draft (a cut per bar, then per beat, with big terminal text over a spectrum panel)
+looked too much like ff-tracking. The owner asked what had changed; the honest answer was mostly
+the concept, not the picture. The picture was rebuilt, the music stayed bit-identical:
+
+- **Subject:** a DAW timeline that follows its playhead (ruler, markers, lanes for pad, kick,
+  clap and hats, bass, master waveform, agent; a live FFT strip at the playhead).
+- **Camera:** one 16 s shot, Catmull-Rom over 12 keyframes, no cuts; palettes blend over 0.5 s.
+- **Tracker:** boxes on the events the playhead touches; kicks, claps and the impact lock red on
+  their frame; labels carry measured values.
+- **Ending:** the timeline stops 0.35 s after the impact and dims; "✓ unmuted" pill.
+
+The structure table above describes the first draft; `hud/src/lib.rs` describes what ships.
