@@ -21,6 +21,7 @@ SR = 48_000
 ROOT = Path(__file__).resolve().parent.parent
 OUT_WAV = ROOT / "out" / "pass" / "music.wav"
 OUT_EVENTS = ROOT / "out" / "events.json"
+STEMS = ROOT / "out" / "stems"
 TARGET_LUFS = -14.0
 CEILING_DB = -1.5
 N = int(SR * S.LENGTH)
@@ -326,11 +327,13 @@ GATE = "x.xxx.xxx.x.xx.x"
 
 def render():
     drums = np.zeros((N, 2))
+    kick_bus = np.zeros((N, 2))
     bass_bus = np.zeros((N, 2))
     pad_bus = np.zeros((N, 2))
     arp_bus = np.zeros((N, 2))
     fx_bus = np.zeros((N, 2))
     data_bus = np.zeros((N, 2))
+    token_stem = np.zeros((N, 2))
     kick_times = []
 
     for bar in range(1, S.BARS + 1):
@@ -369,7 +372,9 @@ def render():
         for k in range(32):
             t = t0 + k * S.STEP / 2
             if rng.random() < dens:
-                place(data_bus, token_click(), t, gain_db=-14, pan=float(rng.uniform(-0.8, 0.8)))
+                click = token_click()
+                place(data_bus, click, t, gain_db=-14, pan=float(rng.uniform(-0.8, 0.8)))
+                place(token_stem, click, t)
                 note("token", t)
             if k % 2 == 0 and rng.random() < dens * 0.85:
                 m = int(rng.choice(DATA_NOTES))
@@ -381,7 +386,7 @@ def render():
             for i, (t, _) in enumerate(S.steps(S.KICK["groove"], bar)):
                 if sec == "build" and i == 3:
                     continue  # leave beat 4 of bar 7 empty before the impact
-                place(drums, kick(), t, gain_db=-4)
+                place(kick_bus, kick(), t, gain_db=-4)
                 kick_times.append(t)
                 note("kick", t, beat=i + 1)
 
@@ -480,6 +485,11 @@ def render():
     fx_bus = reverb(fx_bus, 0.3)
 
     # Mono below 120 Hz keeps the low end solid.
+    # Stems for music/analyze.py: it measures each part on its own, the mix is unchanged.
+    for name, bus in (("kick", kick_bus), ("bass", bass_bus), ("data", data_bus), ("tokens", token_stem)):
+        write(STEMS / f"{name}.wav", bus / (np.max(np.abs(bus)) + 1e-9) * 0.9)
+
+    drums = drums + kick_bus
     mix = drums + bass_bus + pad_bus + arp_bus + fx_bus + data_bus
     low = np.stack([filt(mix[:, c], "lowpass", 120) for c in range(2)], axis=1)
     high = mix - low
