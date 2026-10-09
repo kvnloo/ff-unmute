@@ -1,13 +1,13 @@
-//! Pass 1: the agent's screen while it listens, flat and colorless, with the tracker on top.
+//! Pass 1: a DAW timeline that follows its playhead, flat and colorless, with the tracker.
 //!
-//! White on black only. The lens pass maps brightness to each shot's palette, so the one
+//! White on black only. The lens pass maps brightness to the current palette, so the one
 //! color here is pure red (#ff0000): it marks a locked box and survives the palette.
 //! Drawn in `hud`'s 1920x1080 logical space at 2x, so the lens can magnify it.
 use fframes::{
     AudioMap, Color, Duration, FFramesContext, Frame, SampleSize, Svgr, Video, VisualizeFrameInput,
     WindowFunction, include_media_dir,
 };
-use hud::{Kind, LOG_SIZE, TrackBox};
+use hud::{Lane, TrackBox};
 use std::sync::OnceLock;
 
 include_media_dir!(pub struct FlatMedia, "media");
@@ -18,16 +18,21 @@ const SCALE: f32 = 2.0;
 
 const MONO: &str = "JetBrains Mono";
 const WHITE: &str = "#ffffff";
+const LIT: &str = "#e6e6e6";
+const UNLIT: &str = "#666666";
 const LOG_GRAY: &str = "#5c5c5c";
-const UI_GRAY: &str = "#3a3a3a";
+const UI_GRAY: &str = "#333333";
 const RED: &str = "#ff0000";
 
 /// fframes hands the FFT 1024 contiguous samples from the start of each frame.
 const FFT_SIZE: usize = 1024;
 const SAMPLE_RATE: f32 = 48_000.0;
-/// Bar height mapping of the FFT magnitude, dB.
 const DB_FLOOR: f32 = -6.0;
 const DB_CEIL: f32 = 48.0;
+
+/// Visible range of the timeline in logical x.
+const VIEW_X0: f32 = hud::LANE_LABEL_W;
+const VIEW_X1: f32 = hud::W + 40.0;
 
 #[derive(Default)]
 pub struct FlatVideo;
@@ -54,13 +59,10 @@ impl Video for FlatVideo {
 
     fn render_frame<'a>(&'a self, frame: Frame, ctx: &FFramesContext<'a, '_>) -> Svgr<'a> {
         let g = frame.index;
-        let (si, f) = hud::split(g);
-        let content = match hud::look_of(si).kind {
-            Kind::Listen | Kind::Typing => hero(si, f, true),
-            Kind::Hold => hero(si, f, (f / 4) % 2 == 0),
-            Kind::Done => done(f),
-        };
+        let t = hud::seconds(g);
         let bands = spectrum(&frame, ctx);
+        // After the impact the timeline steps back so the pill can take over.
+        let dim = 1.0 - 0.65 * ((t - hud::IMPACT - 0.15) / 0.3).clamp(0.0, 1.0);
         fframes::svgr!(
             <svg xmlns="http://www.w3.org/2000/svg" width={WIDTH} height={HEIGHT}>
                 <defs>
@@ -73,10 +75,17 @@ impl Video for FlatVideo {
                 </defs>
                 <rect width={WIDTH} height={HEIGHT} fill="#000000" />
                 <g transform={format!("scale({SCALE})")}>
+                    <g opacity={dim}>
+                        {ruler(g)}
+                        {markers(g)}
+                        {lanes(g)}
+                        {waveform(g)}
+                        {fft_strip(&bands)}
+                        {lane_labels()}
+                        {playhead()}
+                    </g>
                     {chrome(g)}
-                    {log(g)}
-                    {spectrum_panel(&bands)}
-                    {content}
+                    {done(g)}
                     {tracker(g)}
                 </g>
             </svg>
@@ -84,16 +93,201 @@ impl Video for FlatVideo {
     }
 }
 
+fn visible(x: f32, w: f32) -> bool {
+    x + w > VIEW_X0 - 10.0 && x < VIEW_X1
+}
+
+fn ruler<'a>(g: usize) -> Svgr<'a> {
+    let beat = 60.0 / hud::BPM;
+    let mut items = vec![];
+    for b in 0..=32usize {
+        let tb = b as f32 * beat;
+        let x = hud::time_x(tb, g);
+        if !visible(x, 1.0) {
+            continue;
+        }
+        let bar = b % 4 == 0;
+        let h = if bar { 16.0 } else { 8.0 };
+        items.push(fframes::svgr!(<rect x={x} y={hud::RULER_Y - h} width="1.5" height={h} fill={if bar { "#8a8a8a" } else { LOG_GRAY }} />));
+        if bar {
+            let label = format!("{}   {:.1} s", b / 4 + 1, tb);
+            items.push(fframes::svgr!(<text x={x + 6.0} y={hud::RULER_Y - 4.0} fill={LOG_GRAY}>{label}</text>));
+        }
+    }
+    fframes::svgr!(
+        <g font-family={MONO} font-weight="400" font-size="15">
+            <rect x={VIEW_X0} y={hud::RULER_Y} width={hud::W} height="1.5" fill={UI_GRAY} />
+            {items}
+        </g>
+    )
+}
+
+/// What the agent writes on the timeline: each marker types itself as the playhead reaches it.
+fn markers<'a>(g: usize) -> Svgr<'a> {
+    let now = hud::seconds(g);
+    let items: Vec<Svgr> = hud::MARKERS
+        .iter()
+        .filter(|(t, _)| *t <= now)
+        .filter_map(|(t, text)| {
+            let x = hud::time_x(*t, g);
+            let n = text.chars().count();
+            let shown = ((now - t) / 0.25 * n as f32).ceil().min(n as f32) as usize;
+            let s: String = text.chars().take(shown.max(1)).collect();
+            let w = n as f32 * 26.0 * hud::MONO_ADV + 16.0;
+            visible(x, w).then(|| {
+                fframes::svgr!(<g>
+                    <rect x={x} y="58" width="2" height={hud::RULER_Y - 58.0} fill={LIT} />
+                    <rect x={x} y="58" width={w} height="34" fill="#1a1a1a" />
+                    <text x={x + 8.0} y="84" fill={LIT}>{s}</text>
+                </g>)
+            })
+        })
+        .collect();
+    fframes::svgr!(<g font-family={MONO} font-weight="700" font-size="26">{items}</g>)
+}
+
+fn clip<'a>(x: f32, y: f32, w: f32, h: f32, lit: bool) -> Svgr<'a> {
+    let fill = if lit { LIT } else { UNLIT };
+    fframes::svgr!(<rect x={x} y={y} width={w.max(1.0)} height={h.max(1.0)} rx="2" fill={fill} />)
+}
+
+fn lanes<'a>(g: usize) -> Svgr<'a> {
+    let now = hud::seconds(g);
+    let mut items: Vec<Svgr> = vec![];
+    // lane separators
+    for l in hud::LANES.iter() {
+        items.push(fframes::svgr!(<rect x={VIEW_X0} y={l.top + l.h + 4.0} width={hud::W} height="1" fill={UI_GRAY} />));
+    }
+    // pad: a block per bar with the chord name, the arp notes inside
+    for (t, chord) in hud::CHORDS.iter() {
+        let x = hud::time_x(*t, g);
+        let w = 2.0 * hud::PX_PER_S - 6.0;
+        if visible(x, w) {
+            let lit = *t <= now;
+            items.push(fframes::svgr!(<g>
+                <rect x={x} y={hud::PAD.top} width={w} height={hud::PAD.h} rx="4" fill="#161616" stroke={if lit { "#7a7a7a" } else { "#3a3a3a" }} stroke-width="1.5" />
+                <text x={x + 10.0} y={hud::PAD.top + 24.0} font-family={MONO} font-weight="700" font-size="20" fill={if lit { LIT } else { UNLIT }}>{*chord}</text>
+            </g>));
+        }
+    }
+    for (t, m) in hud::ARP.iter() {
+        let x = hud::time_x(*t, g);
+        if visible(x, 20.0) {
+            items.push(clip(x, hud::arp_y(*m), 0.1 * hud::PX_PER_S, 6.0, *t <= now));
+        }
+    }
+    // kick, clap, hats
+    for t in hud::KICKS.iter().chain([hud::IMPACT].iter()) {
+        let x = hud::time_x(*t, g);
+        if visible(x, 40.0) {
+            items.push(clip(
+                x,
+                hud::KICK.top + 6.0,
+                0.12 * hud::PX_PER_S,
+                hud::KICK.h - 12.0,
+                *t <= now,
+            ));
+        }
+    }
+    for t in hud::CLAPS.iter() {
+        let x = hud::time_x(*t, g);
+        if visible(x, 30.0) {
+            items.push(clip(
+                x,
+                hud::CLAP.top + 6.0,
+                0.09 * hud::PX_PER_S,
+                hud::CLAP.h - 20.0,
+                *t <= now,
+            ));
+        }
+    }
+    for t in hud::HATS.iter() {
+        let x = hud::time_x(*t, g);
+        if visible(x, 4.0) {
+            items.push(clip(
+                x,
+                hud::CLAP.top + hud::CLAP.h - 10.0,
+                3.0,
+                8.0,
+                *t <= now,
+            ));
+        }
+    }
+    // bass piano roll
+    for (t, m) in hud::BASS.iter() {
+        let x = hud::time_x(*t, g);
+        if visible(x, 70.0) {
+            items.push(clip(
+                x,
+                hud::bass_y(*m),
+                0.125 * 1.6 * hud::PX_PER_S - 4.0,
+                14.0,
+                *t <= now,
+            ));
+        }
+    }
+    // the agent: bleeps by pitch, tokens as ticks
+    for (t, hz) in hud::BLEEPS.iter() {
+        let x = hud::time_x(*t, g);
+        if visible(x, 20.0) {
+            items.push(clip(
+                x,
+                hud::bleep_y(*hz),
+                0.05 * hud::PX_PER_S,
+                12.0,
+                *t <= now,
+            ));
+        }
+    }
+    for t in hud::TOKENS.iter() {
+        let x = hud::time_x(*t, g);
+        if visible(x, 4.0) {
+            items.push(clip(
+                x - 1.0,
+                hud::DATA.top + hud::DATA.h - 36.0,
+                3.0,
+                26.0,
+                *t <= now,
+            ));
+        }
+    }
+    fframes::svgr!(<g>{items}</g>)
+}
+
+/// Master waveform from music.wav's peaks, bright where the playhead has passed.
+fn waveform<'a>(g: usize) -> Svgr<'a> {
+    let now = hud::seconds(g);
+    let mid = hud::WAVE_LANE.mid();
+    let half = hud::WAVE_LANE.h * 0.5 - 8.0;
+    let col_w = hud::PX_PER_S / hud::WAVE_COLS_PER_S;
+    let cols: Vec<Svgr> = hud::WAVE
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &p)| {
+            let t = i as f32 / hud::WAVE_COLS_PER_S;
+            let x = hud::time_x(t, g);
+            visible(x, col_w).then(|| {
+                let h = 1.0 + p * half;
+                let fill = if t <= now { LIT } else { UNLIT };
+                fframes::svgr!(<rect x={x} y={mid - h} width={col_w - 0.6} height={2.0 * h} fill={fill} />)
+            })
+        })
+        .collect();
+    fframes::svgr!(<g>
+        <rect x={VIEW_X0} y={mid} width={hud::W} height="1" fill={UI_GRAY} />
+        {cols}
+    </g>)
+}
+
 /// FFT bin ranges of the log-spaced bands (computed once).
 fn band_bins() -> &'static Vec<(usize, usize)> {
     static BINS: OnceLock<Vec<(usize, usize)>> = OnceLock::new();
     BINS.get_or_init(|| {
         let bin_hz = SAMPLE_RATE / FFT_SIZE as f32;
-        (0..hud::SPEC_BANDS)
+        (0..hud::FFT_BANDS)
             .map(|b| {
                 let edge = |i: usize| {
-                    hud::SPEC_LO
-                        * (hud::SPEC_HI / hud::SPEC_LO).powf(i as f32 / hud::SPEC_BANDS as f32)
+                    hud::FFT_LO * (hud::FFT_HI / hud::FFT_LO).powf(i as f32 / hud::FFT_BANDS as f32)
                 };
                 let lo = (edge(b) / bin_hz).floor() as usize;
                 let hi = ((edge(b + 1) / bin_hz).ceil() as usize).max(lo + 1);
@@ -106,7 +300,7 @@ fn band_bins() -> &'static Vec<(usize, usize)> {
 /// Band levels 0..1 from fframes' FFT of music.wav at this frame.
 fn spectrum(frame: &Frame, ctx: &FFramesContext) -> Vec<f32> {
     let Some(audio) = ctx.get_audio("music.wav") else {
-        return vec![0.0; hud::SPEC_BANDS];
+        return vec![0.0; hud::FFT_BANDS];
     };
     let mags = frame.visualize_audio_frame(VisualizeFrameInput {
         audio,
@@ -121,49 +315,45 @@ fn spectrum(frame: &Frame, ctx: &FFramesContext) -> Vec<f32> {
                 .get(lo..hi.min(mags.len()))
                 .map(|s| s.iter().cloned().fold(0.0, f32::max))
                 .unwrap_or(0.0);
-            let db = 20.0 * (m + 1e-6).log10();
-            ((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR)).clamp(0.0, 1.0)
+            ((20.0 * (m + 1e-6).log10() - DB_FLOOR) / (DB_CEIL - DB_FLOOR)).clamp(0.0, 1.0)
         })
         .collect()
 }
 
-fn spectrum_panel<'a>(bands: &[f32]) -> Svgr<'a> {
+fn fft_strip<'a>(bands: &[f32]) -> Svgr<'a> {
     let n = bands.len().max(1);
-    let step = (hud::SPEC_X1 - hud::SPEC_X0) / n as f32;
-    let full = hud::SPEC_BASE - hud::SPEC_TOP - 20.0;
+    let step = (hud::FFT_BOTTOM - hud::FFT_TOP) / n as f32;
     let bars: Vec<Svgr> = bands
         .iter()
         .enumerate()
         .map(|(i, &v)| {
-            let h = 1.0 + v * full;
-            let x = hud::SPEC_X0 + i as f32 * step + 2.0;
-            let fill = if v > 0.75 { "#ffffff" } else { "#bdbdbd" };
-            fframes::svgr!(<rect x={x} y={hud::SPEC_BASE - h} width={step - 4.0} height={h} fill={fill} />)
+            let y = hud::FFT_BOTTOM - (i + 1) as f32 * step + 1.5;
+            fframes::svgr!(<rect x={hud::FFT_X} y={y} width={0.5 + v * hud::FFT_W} height={step - 3.0} fill="#9a9a9a" />)
         })
         .collect();
-    let ticks: Vec<Svgr> = [50.0_f32, 100.0, 500.0, 1000.0, 5000.0, 10000.0]
+    fframes::svgr!(<g>{bars}</g>)
+}
+
+fn lane_labels<'a>() -> Svgr<'a> {
+    let rows: Vec<Svgr> = hud::LANES
         .iter()
-        .map(|&hz| {
-            let x = hud::hz_x(hz);
-            let label = if hz >= 1000.0 {
-                format!("{}k", hz / 1000.0)
-            } else {
-                format!("{hz}")
-            };
-            fframes::svgr!(<g>
-                <rect x={x} y={hud::SPEC_BASE + 2.0} width="1.5" height="8" fill={LOG_GRAY} />
-                <text x={x + 4.0} y={hud::SPEC_BASE + 24.0} fill={LOG_GRAY}>{label}</text>
-            </g>)
-        })
+        .map(|l: &Lane| fframes::svgr!(<text x="24" y={l.mid() + 6.0} fill={LOG_GRAY}>{l.name}</text>))
         .collect();
     fframes::svgr!(
-        <g font-family={MONO} font-weight="400" font-size="16">
-            <rect x={hud::SPEC_X0} y={hud::SPEC_BASE} width={hud::SPEC_X1 - hud::SPEC_X0} height="1.5" fill={UI_GRAY} />
-            <text x={hud::SPEC_X0} y={hud::SPEC_TOP - 8.0} fill={LOG_GRAY}>"fft 1024 · hann · 40 Hz – 16 kHz"</text>
-            {bars}
-            {ticks}
+        <g font-family={MONO} font-weight="400" font-size="18">
+            <rect x="0" y="50" width={hud::LANE_LABEL_W - 8.0} height="900" fill="#000000" />
+            <rect x={hud::LANE_LABEL_W - 8.0} y="50" width="1.5" height="900" fill={UI_GRAY} />
+            {rows}
         </g>
     )
+}
+
+fn playhead<'a>() -> Svgr<'a> {
+    let x = hud::PLAYHEAD_X;
+    fframes::svgr!(<g>
+        <path d={format!("M {} {} l 9 -12 l -18 0 z", x, hud::RULER_Y)} fill={WHITE} />
+        <rect x={x - 1.2} y={hud::RULER_Y} width="2.4" height={hud::DATA.top + hud::DATA.h - hud::RULER_Y} fill={WHITE} />
+    </g>)
 }
 
 /// Title bar, status line and a level meter fed by the measured RMS of each frame.
@@ -172,10 +362,11 @@ fn chrome<'a>(g: usize) -> Svgr<'a> {
     let beat = (t / (60.0 / hud::BPM)) as usize;
     let rms = hud::RMS.get(g).copied().unwrap_or(-90.0);
     let status = format!(
-        "{:.0} BPM  ·  bar {}/8  ·  beat {}  ·  {:>6.1} dBFS  ·  frame {:03}/{}",
+        "{:.0} BPM  ·  bar {}/8  ·  beat {}  ·  {:06.3} s  ·  {:>6.1} dBFS  ·  frame {:03}/{}",
         hud::BPM,
         (beat / 4 + 1).min(8),
         beat % 4 + 1,
+        t,
         rms,
         g + 1,
         hud::TOTAL_FRAMES
@@ -183,81 +374,28 @@ fn chrome<'a>(g: usize) -> Svgr<'a> {
     let level = ((rms + 48.0) / 48.0).clamp(0.0, 1.0) * 520.0;
     fframes::svgr!(
         <g font-family={MONO} font-weight="400" font-size="18" fill={LOG_GRAY}>
-            <circle cx="104" cy="30" r="7" fill={UI_GRAY} />
-            <circle cx="128" cy="30" r="7" fill={UI_GRAY} />
-            <circle cx="152" cy="30" r="7" fill={UI_GRAY} />
-            <text x="190" y="36">"agent — listening  ·  ~/ff-unmute/out/pass/music.wav"</text>
-            <rect x="100" y="48" width="1720" height="1" fill={UI_GRAY} />
-            <rect x="1250" y="22" width="520" height="14" fill="none" stroke={UI_GRAY} stroke-width="1.5" />
-            <rect x="1250" y="22" width={level.max(0.5)} height="14" fill="#9a9a9a" />
-            <rect x="100" y="1036" width="1720" height="1" fill={UI_GRAY} />
-            <text x="100" y="1064">{status}</text>
+            <circle cx="24" cy="26" r="6" fill={UI_GRAY} />
+            <circle cx="44" cy="26" r="6" fill={UI_GRAY} />
+            <circle cx="64" cy="26" r="6" fill={UI_GRAY} />
+            <text x="96" y="32">"agent — listening  ·  ~/ff-unmute/out/pass/music.wav  ·  follow playhead"</text>
+            <rect x="1250" y="18" width="520" height="14" fill="none" stroke={UI_GRAY} stroke-width="1.5" />
+            <rect x="1250" y="18" width={level.max(0.5)} height="14" fill="#9a9a9a" />
+            <rect x="0" y="1012" width={hud::W} height="1" fill={UI_GRAY} />
+            <text x="24" y="1046">{status}</text>
         </g>
     )
 }
 
-fn log<'a>(g: usize) -> Svgr<'a> {
-    let rows = hud::log_rows(g);
-    let last = rows.len().saturating_sub(1);
-    let rows: Vec<Svgr> = rows
-        .into_iter()
-        .enumerate()
-        .map(|(i, (text, x, y))| {
-            let fill = if i == last {
-                "#a8a8a8"
-            } else if text.starts_with('›') {
-                "#7a7a7a"
-            } else {
-                LOG_GRAY
-            };
-            fframes::svgr!(<text x={x} y={y} fill={fill}>{text}</text>)
-        })
-        .collect();
-    fframes::svgr!(<g font-family={MONO} font-weight="400" font-size={LOG_SIZE}>{rows}</g>)
-}
-
-/// The hero line, one glyph per cell so the tracker's coordinates are exact.
-fn hero<'a>(si: usize, f: usize, cursor_on: bool) -> Svgr<'a> {
-    let l = hud::look_of(si);
-    let n = hud::visible(si, f);
-    let typing = f as f32 <= hud::shot_len(si) as f32 * 0.5;
-    let glyphs: Vec<Svgr> = hud::text(si)
-        .chars()
-        .take(n)
-        .enumerate()
-        .map(|(i, c)| {
-            let (x, _, _, _) = hud::cell(si, i);
-            // The newest glyph arrives overexposed and settles.
-            let fill = if typing && n - 1 - i < 2 {
-                "#ffffff"
-            } else {
-                "#e9e9e9"
-            };
-            fframes::svgr!(<text x={x} y={l.hero.1} fill={fill}>{c.to_string()}</text>)
-        })
-        .collect();
-    let (cx, cy, cw, ch) = hud::cell(si, n);
-    let cursor = if cursor_on {
-        fframes::svgr!(<rect x={cx + cw * 0.12} y={cy} width={cw * 0.62} height={ch} fill={WHITE} />)
-    } else {
-        Svgr::empty()
-    };
-    fframes::svgr!(
-        <g font-family={MONO} font-weight="700" font-size={l.size}>
-            {glyphs}
-            {cursor}
-        </g>
-    )
-}
-
-fn done<'a>(f: usize) -> Svgr<'a> {
+fn done<'a>(g: usize) -> Svgr<'a> {
+    let start = hud::frame_of(hud::IMPACT);
+    if g < start + 8 {
+        return Svgr::empty();
+    }
+    let f = g - start;
     let (cx, cy, w, h) = hud::done_pill();
     let (ix, iy) = hud::done_icon();
     let (lx, ly) = hud::done_label();
     let grow = hud::ease_out(((f as f32 - 8.0) / 6.0).clamp(0.0, 1.0));
-    if f < 8 {
-        return Svgr::empty();
-    }
     let pw = 80.0 + (w - 80.0) * grow;
     let ph = 80.0 + (h - 80.0) * grow;
     let label_opacity = ((f as f32 - 11.0) / 4.0).clamp(0.0, 1.0);
@@ -278,7 +416,6 @@ fn done<'a>(f: usize) -> Svgr<'a> {
 }
 
 /// The tracker's boxes, on the screen itself so they take the LED grid and the blur.
-/// Labels, links and the crosshair belong to the camera and are drawn by the lens pass.
 fn tracker<'a>(g: usize) -> Svgr<'a> {
     let boxes: Vec<Svgr> = hud::track(g).boxes.iter().map(tracker_box).collect();
     fframes::svgr!(<g>{boxes}</g>)
@@ -286,7 +423,6 @@ fn tracker<'a>(g: usize) -> Svgr<'a> {
 
 fn tracker_box<'a>(b: &TrackBox) -> Svgr<'a> {
     let stroke = if b.locked { RED } else { WHITE };
-    // Hatch in difference mode: stripes turn dark where they cross a glyph.
     let fill = if !b.hatch {
         Svgr::empty()
     } else if b.locked {

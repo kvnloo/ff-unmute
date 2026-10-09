@@ -140,6 +140,32 @@ out = [
     "/// The agent's log: when it heard it (s), the line.\n",
     arr("LOG", "(f32, &str)", log, lambda v: f"({f32(v[0])}, {rs_str(v[1])})"),
 ]
+
+# ---- timeline data for the DAW view ----
+import wave as _wave
+
+import numpy as _np
+
+_w = _wave.open(str(ROOT / "out" / "pass" / "music.wav"))
+_x = _np.frombuffer(_w.readframes(_w.getnframes()), "<i2").reshape(-1, _w.getnchannels()).mean(axis=1) / 32768.0
+COLS_PER_S = 160  # one waveform column per 2 logical px at 320 px/s
+_hop = _w.getframerate() // COLS_PER_S
+_peaks = [float(_np.max(_np.abs(_x[i * _hop : (i + 1) * _hop]))) for i in range(len(_x) // _hop)]
+_norm = max(_peaks) or 1.0
+markers = [(t, s) for t, s in zip(starts, texts) if s]
+bars = [(e["t"], e["chord"]) for e in EV if e["kind"] == "bar"]
+out += [
+    f"pub const WAVE_COLS_PER_S: f32 = {COLS_PER_S:.1f};\n",
+    "/// Peak level per waveform column of music.wav, normalized to the loudest column.\n",
+    arr("WAVE", "f32", [p / _norm for p in _peaks], lambda v: f"{v:.3f}"),
+    arr("HATS", "f32", times("hat"), f32),
+    "/// Bass and arp notes: time (s), MIDI note.\n",
+    arr("BASS", "(f32, u8)", [(e["t"], e["midi"]) for e in EV if e["kind"] == "bass"], lambda v: f"({f32(v[0])}, {v[1]})"),
+    arr("ARP", "(f32, u8)", [(e["t"], e["midi"]) for e in EV if e["kind"] == "arp"], lambda v: f"({f32(v[0])}, {v[1]})"),
+    arr("CHORDS", "(f32, &str)", bars, lambda v: f"({f32(v[0])}, {rs_str(v[1])})"),
+    "/// What the agent writes on the timeline: time (s), text.\n",
+    arr("MARKERS", "(f32, &str)", markers, lambda v: f"({f32(v[0])}, {rs_str(v[1])})"),
+]
 OUT.write_text("".join(out))
 print(
     f"wrote {OUT.relative_to(ROOT)}: {len(starts)} shots, {len(M['kicks'])} kicks, {len(M['blips'])} bleeps, "

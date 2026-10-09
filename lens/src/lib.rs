@@ -44,7 +44,6 @@ impl Video for LensVideo {
     }
 
     fn render_frame<'a>(&'a self, frame: Frame, ctx: &FFramesContext<'a, '_>) -> Svgr<'a> {
-        let (si, f) = hud::split(frame.index);
         let s = hud::shot(frame.index);
         let input = SyncVideoFrameInput {
             start_from: 0.0,
@@ -61,7 +60,7 @@ impl Video for LensVideo {
             );
         };
         let flat = flat.into_image();
-        let p = s.palette.stops();
+        let p = s.stops;
         let uniforms = ShaderUniforms::new()
             .image("iChannel0", &flat)
             .float2("uAim", s.aim.0, s.aim.1)
@@ -79,7 +78,7 @@ impl Video for LensVideo {
             .float("uTear", s.tear)
             .float("uCut", s.cut)
             .float("uOut", s.out)
-            .float("uSeed", (si * 31 + f) as f32)
+            .float("uSeed", frame.index as f32)
             .float("uStage", stage());
         let layer = self.shader.draw(&frame, uniforms);
         fframes::svgr!(
@@ -108,13 +107,9 @@ const RH: f32 = HEIGHT as f32;
 /// a dot running along each link, coordinate labels and brackets on the target. The
 /// numbers are the real pixel positions of the boxes in this frame.
 fn camera_tracker<'a>(s: &hud::Shot, global: usize) -> Svgr<'a> {
-    let (_, f) = hud::split(global);
+    let f = global;
     let t = hud::track(global);
-    let ink = if s.palette == hud::Palette::Paper {
-        "#141414"
-    } else {
-        "#ffffff"
-    };
+    let ink = "#ffffff";
     let proj = |q: (f32, f32)| hud::project(s, q, RW, RH);
     let centers: Vec<Option<(f32, f32)>> = t.boxes.iter().map(|b| proj(b.center())).collect();
 
@@ -176,7 +171,7 @@ fn camera_tracker<'a>(s: &hud::Shot, global: usize) -> Svgr<'a> {
     }
 
     // Brackets around the target box, in screen space.
-    if let Some(b) = t.boxes.get(t.target) {
+    if let Some(b) = t.target.and_then(|i| t.boxes.get(i)) {
         let corners = [
             (b.x, b.y),
             (b.x + b.w, b.y),

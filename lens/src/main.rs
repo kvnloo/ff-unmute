@@ -9,8 +9,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     // out/pass holds flat.mp4 (pass 1) and music.wav (music/synth.py); run from the workspace root.
-    let dir = MediaDirectory::read_folder("out/pass")
-        .expect("out/pass: run tools/render.sh first");
+    let dir = MediaDirectory::read_folder("out/pass").expect("out/pass: run tools/render.sh first");
     let pass = dir.process_media_source().expect("out/pass media");
     // Fonts for the camera tracker's labels.
     let fonts_dir = MediaDirectory::read_folder("media").expect("media folder");

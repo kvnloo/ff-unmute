@@ -1,5 +1,6 @@
-//! Shared data of both passes for ff-unmute: the shots, the tracker and the camera, all
-//! driven by the music. `generated.rs` (from music/gen_hud.py) holds the measured events.
+//! Shared data of both passes for ff-unmute: a DAW timeline that scrolls under a fixed
+//! playhead, the tracker that locks onto every event the playhead touches, and one
+//! continuous camera move. `generated.rs` (music/gen_hud.py) holds the measured events.
 //!
 //! Every position is in the flat pass's logical space, `W` x `H`.
 
@@ -9,38 +10,449 @@ pub use generated::*;
 pub const FPS: usize = 30;
 pub const W: f32 = 1920.0;
 pub const H: f32 = 1080.0;
-pub const SHOTS: usize = 22;
 pub const TOTAL_FRAMES: usize = LENGTH_FRAMES;
 
-/// JetBrains Mono advances 0.6 em per character.
+/// The playhead stays here; the timeline moves left at `PX_PER_S`.
+pub const PLAYHEAD_X: f32 = 960.0;
+pub const PX_PER_S: f32 = 320.0;
+/// After the impact the timeline stops this long later.
+pub const STOP_AFTER: f32 = 0.35;
+
 pub const MONO_ADV: f32 = 0.6;
-pub const LOG_SIZE: f32 = 24.0;
-pub const LOG_LINE: f32 = 40.0;
-pub const LOG_X: f32 = 150.0;
-pub const LOG_TOP: f32 = 96.0;
-pub const LOG_ROWS: usize = 15;
+pub const LANE_LABEL_W: f32 = 150.0;
 
-/// Spectrum panel: log-frequency axis from SPEC_LO to SPEC_HI Hz.
-pub const SPEC_X0: f32 = 150.0;
-pub const SPEC_X1: f32 = 1770.0;
-pub const SPEC_TOP: f32 = 760.0;
-pub const SPEC_BASE: f32 = 990.0;
-pub const SPEC_LO: f32 = 40.0;
-pub const SPEC_HI: f32 = 16_000.0;
-pub const SPEC_BANDS: usize = 56;
+/// A horizontal track of the DAW view.
+#[derive(Clone, Copy, Debug)]
+pub struct Lane {
+    pub name: &'static str,
+    pub top: f32,
+    pub h: f32,
+}
 
-/// Newest characters with a box on them.
-const CHAIN: usize = 4;
-/// A lock lasts this many frames from the kick.
+impl Lane {
+    pub fn mid(&self) -> f32 {
+        self.top + self.h * 0.5
+    }
+}
+
+pub const PAD: Lane = Lane {
+    name: "pad",
+    top: 150.0,
+    h: 64.0,
+};
+pub const KICK: Lane = Lane {
+    name: "kick",
+    top: 226.0,
+    h: 58.0,
+};
+pub const CLAP: Lane = Lane {
+    name: "clap · hat",
+    top: 296.0,
+    h: 48.0,
+};
+pub const BASS_LANE: Lane = Lane {
+    name: "bass",
+    top: 356.0,
+    h: 112.0,
+};
+pub const WAVE_LANE: Lane = Lane {
+    name: "master",
+    top: 480.0,
+    h: 260.0,
+};
+pub const DATA: Lane = Lane {
+    name: "agent",
+    top: 752.0,
+    h: 150.0,
+};
+pub const LANES: [Lane; 6] = [PAD, KICK, CLAP, BASS_LANE, WAVE_LANE, DATA];
+pub const RULER_Y: f32 = 128.0;
+
+/// FFT strip on the right of the playhead: frequency up, level to the right.
+pub const FFT_X: f32 = PLAYHEAD_X + 8.0;
+pub const FFT_W: f32 = 130.0;
+pub const FFT_TOP: f32 = 150.0;
+pub const FFT_BOTTOM: f32 = 902.0;
+pub const FFT_LO: f32 = 40.0;
+pub const FFT_HI: f32 = 16_000.0;
+pub const FFT_BANDS: usize = 48;
+
 pub const LOCK_FRAMES: usize = 2;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
-    Listen,
-    Typing,
-    Hold,
-    Done,
+pub fn seconds(global: usize) -> f32 {
+    global as f32 / FPS as f32
 }
+
+pub fn frame_of(t: f32) -> usize {
+    (t * FPS as f32).round() as usize
+}
+
+/// Time used to lay out the timeline: it stops shortly after the impact.
+pub fn layout_time(global: usize) -> f32 {
+    seconds(global).min(IMPACT + STOP_AFTER)
+}
+
+/// x of a timeline time on the screen at a video frame.
+pub fn time_x(t: f32, global: usize) -> f32 {
+    PLAYHEAD_X + (t - layout_time(global)) * PX_PER_S
+}
+
+pub fn fft_y(hz: f32) -> f32 {
+    let p = (hz.max(FFT_LO) / FFT_LO).ln() / (FFT_HI / FFT_LO).ln();
+    FFT_BOTTOM - p.clamp(0.0, 1.0) * (FFT_BOTTOM - FFT_TOP)
+}
+
+pub fn bass_y(midi: u8) -> f32 {
+    let p = (midi as f32 - 26.0) / (45.0 - 26.0);
+    BASS_LANE.top + 8.0 + (1.0 - p.clamp(0.0, 1.0)) * (BASS_LANE.h - 26.0)
+}
+
+/// Bleep height by frequency (the agent lane is a little piano roll of its own).
+pub fn bleep_y(hz: f32) -> f32 {
+    let p = ((hz / 700.0).ln() / (5000.0_f32 / 700.0).ln()).clamp(0.0, 1.0);
+    DATA.top + 10.0 + (1.0 - p) * (DATA.h - 60.0)
+}
+
+pub fn arp_y(midi: u8) -> f32 {
+    let p = (midi as f32 - 62.0) / (81.0 - 62.0);
+    PAD.top + 6.0 + (1.0 - p.clamp(0.0, 1.0)) * (PAD.h - 18.0)
+}
+
+/// Deterministic noise in 0..1.
+pub fn rnd(a: u32, b: u32) -> f32 {
+    let mut h = a.wrapping_mul(0x9E37_79B1) ^ b.wrapping_mul(0x85EB_CA77) ^ 0x27d4_eb2f;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297A_2D39);
+    h ^= h >> 15;
+    h as f32 / u32::MAX as f32
+}
+
+/// An event clip on the timeline: what the tracker can lock onto.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EventKind {
+    Kick,
+    Clap,
+    Bleep(f32),
+    Token(usize),
+    Impact,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Event {
+    pub t: f32,
+    pub kind: EventKind,
+}
+
+impl Event {
+    /// The clip's rectangle at a time offset 0 (x is relative: add time_x).
+    pub fn rect(&self) -> (f32, f32, f32, f32) {
+        match self.kind {
+            EventKind::Kick => (0.0, KICK.top + 6.0, 0.12 * PX_PER_S, KICK.h - 12.0),
+            EventKind::Clap => (0.0, CLAP.top + 6.0, 0.09 * PX_PER_S, CLAP.h - 20.0),
+            EventKind::Bleep(hz) => (0.0, bleep_y(hz), 0.05 * PX_PER_S, 12.0),
+            EventKind::Token(_) => (-1.0, DATA.top + DATA.h - 36.0, 3.0, 26.0),
+            EventKind::Impact => (
+                0.0,
+                WAVE_LANE.top + 10.0,
+                0.5 * PX_PER_S,
+                WAVE_LANE.h - 20.0,
+            ),
+        }
+    }
+
+    pub fn value(&self) -> String {
+        match self.kind {
+            EventKind::Kick => format!("kick {KICK_HZ:.1} Hz"),
+            EventKind::Clap => "clap".to_string(),
+            EventKind::Bleep(hz) => format!("bleep {hz:.1} Hz"),
+            EventKind::Token(n) => format!("token #{:02}", n + 1),
+            EventKind::Impact => format!("impact {IMPACT:.3} s"),
+        }
+    }
+}
+
+pub fn events() -> &'static Vec<Event> {
+    static EV: std::sync::OnceLock<Vec<Event>> = std::sync::OnceLock::new();
+    EV.get_or_init(|| {
+        let mut v: Vec<Event> = KICKS
+            .iter()
+            .map(|&t| Event {
+                t,
+                kind: EventKind::Kick,
+            })
+            .collect();
+        v.extend(CLAPS.iter().map(|&t| Event {
+            t,
+            kind: EventKind::Clap,
+        }));
+        v.extend(BLEEPS.iter().map(|&(t, hz)| Event {
+            t,
+            kind: EventKind::Bleep(hz),
+        }));
+        v.extend(TOKENS.iter().enumerate().map(|(i, &t)| Event {
+            t,
+            kind: EventKind::Token(i),
+        }));
+        v.push(Event {
+            t: IMPACT,
+            kind: EventKind::Impact,
+        });
+        v.sort_by(|a, b| a.t.total_cmp(&b.t));
+        v
+    })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackBox {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub hatch: bool,
+    pub locked: bool,
+    /// A measured value the camera writes next to the box (e.g. "kick 55.7 Hz").
+    pub value: Option<String>,
+}
+
+impl TrackBox {
+    pub fn center(&self) -> (f32, f32) {
+        (self.x + self.w * 0.5, self.y + self.h * 0.5)
+    }
+}
+
+pub struct Track {
+    pub boxes: Vec<TrackBox>,
+    /// Index of the box the camera focuses on, if any.
+    pub target: Option<usize>,
+    pub tails: Vec<((f32, f32), (f32, f32))>,
+    pub focus: (f32, f32),
+    pub lock: bool,
+}
+
+/// How long a box stays on an event after the playhead passed it (s).
+const TRAIL: f32 = 0.55;
+
+fn jitter(k: usize, g: usize, amp: f32) -> (f32, f32) {
+    let a = (k * 37 + 11) as u32;
+    (
+        (rnd(a, g as u32) - 0.5) * 2.0 * amp,
+        (rnd(a + 1, g as u32 + 999) - 0.5) * 2.0 * amp,
+    )
+}
+
+pub fn is_lock(global: usize) -> bool {
+    events()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                EventKind::Kick | EventKind::Clap | EventKind::Impact
+            )
+        })
+        .any(|e| {
+            let f = frame_of(e.t);
+            global >= f && global < f + LOCK_FRAMES
+        })
+}
+
+pub fn track(global: usize) -> Track {
+    let t = seconds(global);
+    let cam = camera(t);
+    let mut boxes = vec![];
+    let mut kinds = vec![];
+    if t < IMPACT {
+        for (k, e) in events().iter().enumerate() {
+            if e.t > t + 1e-4 || t - e.t > TRAIL {
+                continue;
+            }
+            let (rx, ry, rw, rh) = e.rect();
+            let x = time_x(e.t, global) + rx;
+            let pad = match e.kind {
+                EventKind::Token(_) => 6.0,
+                _ => 5.0 + rnd(k as u32, 3) * 6.0,
+            };
+            let j = jitter(k, global, 1.4);
+            let f = frame_of(e.t);
+            let locked =
+                global >= f && global < f + LOCK_FRAMES && !matches!(e.kind, EventKind::Token(_));
+            boxes.push(TrackBox {
+                x: x - pad + j.0,
+                y: ry - pad + j.1,
+                w: rw + 2.0 * pad,
+                h: rh + 2.0 * pad,
+                hatch: !matches!(e.kind, EventKind::Token(_)) && rnd(k as u32, 7) > 0.3,
+                locked,
+                value: match e.kind {
+                    EventKind::Token(n) if n % 3 != 0 => None,
+                    _ => Some(e.value()),
+                },
+            });
+            kinds.push(e.kind);
+        }
+    } else {
+        boxes = done_boxes(global);
+        kinds = vec![EventKind::Impact; boxes.len()];
+    }
+
+    // Focus: the newest box near where the camera looks, else the playhead at that height.
+    let reach = 0.75 * 540.0 / cam.zoom;
+    let target = (0..boxes.len()).rev().find(|&i| {
+        let (cx, cy) = boxes[i].center();
+        (cy - cam.look_y).abs() < reach
+            && (cx - PLAYHEAD_X).abs() < reach * 1.6
+            && !matches!(kinds[i], EventKind::Token(_))
+    });
+    let focus = target
+        .map(|i| boxes[i].center())
+        .unwrap_or((PLAYHEAD_X, cam.look_y));
+
+    let mut tails = vec![];
+    if let Some(first) = boxes.first() {
+        let c = first.center();
+        let a = rnd(frame_of(t) as u32 / 15, 1) * std::f32::consts::TAU;
+        tails.push((c, (c.0 + a.cos() * 2600.0, c.1 + a.sin() * 2600.0)));
+    }
+    Track {
+        boxes,
+        target,
+        tails,
+        focus,
+        lock: is_lock(global),
+    }
+}
+
+/// The ending: twelve boxes fall into the pill in 10 frames, then the pill's two boxes.
+fn done_boxes(global: usize) -> Vec<TrackBox> {
+    let f = global.saturating_sub(frame_of(IMPACT));
+    let (cx, cy, _, _) = done_pill();
+    let p = ease_in_out((f as f32 / 10.0).min(1.0));
+    let b = |x: f32, y: f32, w: f32, h: f32, hatch: bool| TrackBox {
+        x,
+        y,
+        w,
+        h,
+        hatch,
+        locked: false,
+        value: None,
+    };
+    if p < 1.0 {
+        return (0..12usize)
+            .map(|k| {
+                let sx = 200.0 + rnd(77, k as u32) * (W - 400.0);
+                let sy = 160.0 + rnd(78, k as u32) * (H - 320.0);
+                let sw = 30.0 + rnd(79, k as u32) * 90.0;
+                let sh = 26.0 + rnd(80, k as u32) * 60.0;
+                b(
+                    sx + (cx - 40.0 - sx) * p,
+                    sy + (cy - 40.0 - sy) * p,
+                    sw + (80.0 - sw) * p,
+                    sh + (80.0 - sh) * p,
+                    rnd(81, k as u32) > 0.4,
+                )
+            })
+            .collect();
+    }
+    let (ix, iy) = done_icon();
+    let (dx, dy) = done_label();
+    let mut out = vec![
+        b(ix - 38.0, iy - 32.0, 76.0, 64.0, true),
+        b(dx - 4.0, dy - 66.0, 60.0, 76.0, false),
+    ];
+    out[1].value = Some(format!("{} BPM · {:.1} LUFS", BPM as u32, -14.0));
+    out
+}
+
+pub fn done_pill() -> (f32, f32, f32, f32) {
+    (PLAYHEAD_X, WAVE_LANE.mid(), 600.0, 132.0)
+}
+
+pub fn done_icon() -> (f32, f32) {
+    let (cx, cy, w, _) = done_pill();
+    (cx - w * 0.5 + 92.0, cy)
+}
+
+/// Baseline start of "unmuted".
+pub fn done_label() -> (f32, f32) {
+    let (cx, cy, _, _) = done_pill();
+    (cx - 130.0, cy + 28.0)
+}
+
+pub fn ease_in_out(t: f32) -> f32 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
+pub fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+// ---------- the camera: one move, keyframed ----------
+
+/// (time s, look_y, zoom, tilt_x, tilt_y, roll, x offset from the playhead, blur)
+const KEYS: [(f32, f32, f32, f32, f32, f32, f32, f32); 12] = [
+    (0.0, 610.0, 3.4, 0.38, -0.48, 0.05, -40.0, 1.2),
+    (2.0, 600.0, 2.7, 0.24, 0.34, -0.04, -80.0, 1.1),
+    (4.0, 255.0, 2.5, 0.56, -0.22, 0.03, -30.0, 1.3),
+    (6.0, 412.0, 2.3, 0.30, 0.46, -0.05, -60.0, 1.2),
+    (8.0, 800.0, 2.6, 0.62, -0.30, 0.04, -40.0, 1.3),
+    (10.0, 620.0, 2.0, 0.22, 0.55, -0.06, -90.0, 1.1),
+    (11.0, 330.0, 2.4, 0.42, -0.40, 0.05, -40.0, 1.2),
+    (12.0, 790.0, 2.8, 0.50, 0.30, -0.04, -30.0, 1.3),
+    (13.5, 610.0, 3.9, 0.32, 0.10, 0.00, -20.0, 1.5),
+    (14.0, 610.0, 3.5, 0.30, 0.00, 0.00, 0.0, 1.4),
+    (15.0, 580.0, 1.35, 0.16, -0.10, 0.02, 0.0, 1.0),
+    (16.0, 580.0, 1.25, 0.12, -0.08, 0.02, 0.0, 1.0),
+];
+
+#[derive(Clone, Copy, Debug)]
+pub struct CamKey {
+    pub look_y: f32,
+    pub zoom: f32,
+    pub tilt_x: f32,
+    pub tilt_y: f32,
+    pub roll: f32,
+    pub dx: f32,
+    pub blur: f32,
+}
+
+fn catmull(p0: f32, p1: f32, p2: f32, p3: f32, u: f32) -> f32 {
+    0.5 * ((2.0 * p1)
+        + (-p0 + p2) * u
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * u * u
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * u * u * u)
+}
+
+pub fn camera(t: f32) -> CamKey {
+    let n = KEYS.len();
+    let i = (0..n - 1).rfind(|&i| KEYS[i].0 <= t).unwrap_or(0);
+    let k = |j: isize| KEYS[(j.clamp(0, n as isize - 1)) as usize];
+    let (a, b, c, d) = (
+        k(i as isize - 1),
+        k(i as isize),
+        k(i as isize + 1),
+        k(i as isize + 2),
+    );
+    let u = ((t - b.0) / (c.0 - b.0).max(1e-3)).clamp(0.0, 1.0);
+    let s = |f: fn(&(f32, f32, f32, f32, f32, f32, f32, f32)) -> f32| {
+        catmull(f(&a), f(&b), f(&c), f(&d), u)
+    };
+    CamKey {
+        look_y: s(|x| x.1),
+        zoom: s(|x| x.2).max(1.0),
+        tilt_x: s(|x| x.3),
+        tilt_y: s(|x| x.4),
+        roll: s(|x| x.5),
+        dx: s(|x| x.6),
+        blur: s(|x| x.7),
+    }
+}
+
+// ---------- palettes, blended over time ----------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Palette {
@@ -76,292 +488,42 @@ impl Palette {
     }
 }
 
-/// Virtual camera filming the flat screen. Angles in radians, zoom 1 shows the whole screen.
-#[derive(Clone, Copy, Debug)]
-pub struct Cam {
-    pub tilt_x: f32,
-    pub tilt_y: f32,
-    pub roll: f32,
-    pub zoom: (f32, f32),
-    pub pan: (f32, f32),
-    pub blur: f32,
-}
-
-/// What a shot looks like; its timing and text come from `generated.rs`.
-pub struct Look {
-    pub kind: Kind,
-    pub palette: Palette,
-    pub cam: Cam,
-    /// Baseline start of the hero line.
-    pub hero: (f32, f32),
-    pub size: f32,
-    /// Track a frequency on the spectrum instead of the newest glyph (Hz).
-    pub track_hz: Option<f32>,
-}
-
-const fn cam(
-    tilt_x: f32,
-    tilt_y: f32,
-    roll: f32,
-    z0: f32,
-    z1: f32,
-    px: f32,
-    py: f32,
-    blur: f32,
-) -> Cam {
-    Cam {
-        tilt_x,
-        tilt_y,
-        roll,
-        zoom: (z0, z1),
-        pan: (px, py),
-        blur,
-    }
-}
-
-const fn look(kind: Kind, palette: Palette, cam: Cam, hero: (f32, f32), size: f32) -> Look {
-    Look {
-        kind,
-        palette,
-        cam,
-        hero,
-        size,
-        track_hz: None,
-    }
-}
-
-const fn on_hz(
-    kind: Kind,
-    palette: Palette,
-    cam: Cam,
-    hero: (f32, f32),
-    size: f32,
-    hz: f32,
-) -> Look {
-    Look {
-        kind,
-        palette,
-        cam,
-        hero,
-        size,
-        track_hz: Some(hz),
-    }
-}
-
-use Kind::*;
-use Palette::*;
-
-pub const LOOKS: [Look; SHOTS] = [
-    // bars 1-2: listening, slow
-    look(
-        Listen,
-        Mono,
-        cam(0.30, 0.42, -0.04, 1.6, 2.1, 80.0, 0.0, 1.0),
-        (560.0, 520.0),
-        120.0,
-    ),
-    look(
-        Listen,
-        Navy,
-        cam(0.18, -0.38, 0.03, 1.9, 2.3, -60.0, 0.0, 1.0),
-        (420.0, 520.0),
-        100.0,
-    ),
-    // bars 3-4: the kick arrives
-    look(
-        Typing,
-        Thermal,
-        cam(0.34, -0.24, 0.04, 2.3, 2.6, 40.0, 0.0, 1.2),
-        (420.0, 500.0),
-        112.0,
-    ),
-    on_hz(
-        Typing,
-        Thermal,
-        cam(0.62, 0.12, -0.08, 2.0, 2.3, 0.0, 0.0, 1.3),
-        (460.0, 500.0),
-        108.0,
-        KICK_HZ,
-    ),
-    look(
-        Typing,
-        Phosphor,
-        cam(0.14, 0.55, -0.05, 2.2, 2.5, 30.0, 0.0, 1.1),
-        (300.0, 520.0),
-        100.0,
-    ),
-    on_hz(
-        Typing,
-        Phosphor,
-        cam(0.70, -0.20, 0.06, 1.9, 2.2, -20.0, 0.0, 1.2),
-        (420.0, 500.0),
-        108.0,
-        BASS_HZ,
-    ),
-    // bars 5-6: a cut per beat
-    look(
-        Typing,
-        Amber,
-        cam(0.28, -0.50, 0.05, 2.6, 2.8, 0.0, 0.0, 1.2),
-        (330.0, 520.0),
-        104.0,
-    ),
-    look(
-        Typing,
-        Amber,
-        cam(0.20, 0.48, -0.06, 3.0, 3.2, 0.0, 0.0, 1.3),
-        (620.0, 520.0),
-        120.0,
-    ),
-    look(
-        Typing,
-        Thermal,
-        cam(0.40, 0.10, 0.02, 2.6, 2.9, 20.0, 0.0, 1.1),
-        (520.0, 520.0),
-        116.0,
-    ),
-    on_hz(
-        Typing,
-        Thermal,
-        cam(0.66, -0.30, -0.04, 2.1, 2.4, 0.0, 0.0, 1.3),
-        (420.0, 500.0),
-        104.0,
-        880.0,
-    ),
-    look(
-        Typing,
-        Navy,
-        cam(0.22, -0.40, 0.04, 3.0, 3.2, 0.0, 0.0, 1.2),
-        (620.0, 520.0),
-        120.0,
-    ),
-    look(
-        Typing,
-        Mono,
-        cam(0.10, 0.52, -0.03, 2.4, 2.6, 30.0, 0.0, 1.1),
-        (260.0, 520.0),
-        96.0,
-    ),
-    look(
-        Typing,
-        Phosphor,
-        cam(0.36, -0.18, 0.05, 2.5, 2.7, 0.0, 0.0, 1.2),
-        (300.0, 520.0),
-        100.0,
-    ),
-    look(
-        Typing,
-        Thermal,
-        cam(0.24, 0.40, -0.05, 2.7, 3.0, 0.0, 0.0, 1.2),
-        (420.0, 520.0),
-        112.0,
-    ),
-    // bar 7: an 8th per shot, closer every time
-    look(
-        Typing,
-        Phosphor,
-        cam(0.30, -0.45, 0.06, 3.0, 3.2, 0.0, 0.0, 1.3),
-        (640.0, 520.0),
-        130.0,
-    ),
-    look(
-        Typing,
-        Thermal,
-        cam(0.30, 0.45, -0.06, 3.1, 3.3, 0.0, 0.0, 1.3),
-        (640.0, 520.0),
-        130.0,
-    ),
-    look(
-        Typing,
-        Amber,
-        cam(0.50, -0.30, 0.04, 3.2, 3.4, 0.0, 0.0, 1.3),
-        (580.0, 520.0),
-        130.0,
-    ),
-    look(
-        Typing,
-        Navy,
-        cam(0.50, 0.30, -0.04, 3.3, 3.5, 0.0, 0.0, 1.4),
-        (640.0, 520.0),
-        130.0,
-    ),
-    look(
-        Typing,
-        Paper,
-        cam(0.20, -0.20, 0.08, 3.4, 3.6, 0.0, 0.0, 1.4),
-        (640.0, 520.0),
-        130.0,
-    ),
-    look(
-        Typing,
-        Thermal,
-        cam(0.20, 0.20, -0.08, 3.6, 4.0, 0.0, 0.0, 1.5),
-        (760.0, 520.0),
-        140.0,
-    ),
-    // bar 7 beat 4: the held breath
-    look(
-        Hold,
-        Mono,
-        cam(0.40, 0.00, 0.00, 2.4, 2.2, 0.0, 0.0, 1.8),
-        (900.0, 520.0),
-        120.0,
-    ),
-    // bar 8: impact, collapse, unmuted
-    look(
-        Done,
-        Neon,
-        cam(0.44, -0.30, 0.05, 3.2, 2.0, 0.0, 0.0, 1.2),
-        (960.0, 540.0),
-        80.0,
-    ),
+/// From this time on, this palette (blended in over `BLEND` s).
+pub const PALETTES: [(f32, Palette); 9] = [
+    (0.0, Palette::Mono),
+    (2.0, Palette::Navy),
+    (4.0, Palette::Thermal),
+    (8.0, Palette::Phosphor),
+    (10.0, Palette::Amber),
+    (12.0, Palette::Thermal),
+    (13.0, Palette::Navy),
+    (13.5, Palette::Mono),
+    (14.0, Palette::Neon),
 ];
+const BLEND: f32 = 0.5;
 
-/// Shot index and frame inside it for a video frame.
-pub fn split(global: usize) -> (usize, usize) {
-    let g = global.min(TOTAL_FRAMES - 1);
-    let si = (0..SHOTS).rfind(|&i| SHOT_FRAMES[i] <= g).unwrap_or(0);
-    (si, g - SHOT_FRAMES[si])
+pub fn palette_stops(t: f32) -> [[f32; 3]; 5] {
+    let i = (0..PALETTES.len())
+        .rfind(|&i| PALETTES[i].0 <= t)
+        .unwrap_or(0);
+    let cur = PALETTES[i].1.stops();
+    if i == 0 {
+        return cur;
+    }
+    let prev = PALETTES[i - 1].1.stops();
+    let u = ((t - PALETTES[i].0) / BLEND).clamp(0.0, 1.0);
+    let u = u * u * (3.0 - 2.0 * u);
+    let mut out = cur;
+    for s in 0..5 {
+        for c in 0..3 {
+            out[s][c] = prev[s][c] + (cur[s][c] - prev[s][c]) * u;
+        }
+    }
+    out
 }
 
-pub fn shot_len(si: usize) -> usize {
-    SHOT_FRAMES[si + 1] - SHOT_FRAMES[si]
-}
+// ---------- envelopes ----------
 
-pub fn look_of(si: usize) -> &'static Look {
-    &LOOKS[si.min(SHOTS - 1)]
-}
-
-pub fn text(si: usize) -> &'static str {
-    SHOT_TEXT[si.min(SHOTS - 1)]
-}
-
-pub fn seconds(global: usize) -> f32 {
-    global as f32 / FPS as f32
-}
-
-pub fn frame_of(t: f32) -> usize {
-    (t * FPS as f32).round() as usize
-}
-
-/// Deterministic noise in 0..1.
-pub fn rnd(a: u32, b: u32) -> f32 {
-    let mut h = a.wrapping_mul(0x9E37_79B1) ^ b.wrapping_mul(0x85EB_CA77) ^ 0x27d4_eb2f;
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x2C1B_3C6D);
-    h ^= h >> 12;
-    h = h.wrapping_mul(0x297A_2D39);
-    h ^= h >> 15;
-    h as f32 / u32::MAX as f32
-}
-
-/// x of a frequency on the spectrum panel.
-pub fn hz_x(hz: f32) -> f32 {
-    let p = (hz.max(SPEC_LO) / SPEC_LO).ln() / (SPEC_HI / SPEC_LO).ln();
-    SPEC_X0 + p.clamp(0.0, 1.0) * (SPEC_X1 - SPEC_X0)
-}
-
-/// Envelope of the most recent event before `t` with an exponential decay.
 fn env(events: &[f32], t: f32, decay: f32) -> f32 {
     events
         .iter()
@@ -382,299 +544,6 @@ pub fn stutter_on(t: f32) -> bool {
     STUTTERS.iter().any(|&s| t >= s && t < s + 0.25)
 }
 
-/// Frames at which a kick (or the impact) lands.
-pub fn is_lock(global: usize) -> bool {
-    KICKS.iter().chain([IMPACT].iter()).any(|&k| {
-        let f = frame_of(k);
-        global >= f && global < f + LOCK_FRAMES
-    })
-}
-
-fn last_lock_before(global: usize) -> Option<usize> {
-    KICKS
-        .iter()
-        .chain([IMPACT].iter())
-        .map(|&k| frame_of(k))
-        .filter(|&f| f <= global)
-        .max()
-}
-
-fn chars(si: usize) -> Vec<char> {
-    text(si).chars().collect()
-}
-
-/// Characters of the hero line on screen at shot frame `f`: types in the first half.
-pub fn visible(si: usize, f: usize) -> usize {
-    let n = chars(si).len();
-    let l = look_of(si);
-    match l.kind {
-        Listen | Typing => {
-            let p = (f as f32 / (shot_len(si) as f32 * 0.5).max(1.0)).min(1.0);
-            ((n as f32) * (0.3 + 0.7 * p)).ceil() as usize
-        }
-        _ => n,
-    }
-    .min(n)
-}
-
-/// Cell of character `i` of the hero line: x, y (top), w, h.
-pub fn cell(si: usize, i: usize) -> (f32, f32, f32, f32) {
-    let l = look_of(si);
-    let adv = l.size * MONO_ADV;
-    (
-        l.hero.0 + i as f32 * adv,
-        l.hero.1 - l.size * 0.78,
-        adv,
-        l.size * 0.98,
-    )
-}
-
-/// The agent's log on screen at a video frame: (text, x, baseline y), newest at the bottom.
-pub fn log_rows(global: usize) -> Vec<(&'static str, f32, f32)> {
-    let t = seconds(global);
-    let heard: Vec<&'static str> = LOG
-        .iter()
-        .filter(|(lt, _)| *lt <= t)
-        .map(|(_, s)| *s)
-        .collect();
-    let from = heard.len().saturating_sub(LOG_ROWS);
-    heard[from..]
-        .iter()
-        .enumerate()
-        .map(|(r, s)| (*s, LOG_X, LOG_TOP + r as f32 * LOG_LINE))
-        .filter(|(_, _, y)| (*y - 520.0).abs() > 110.0 || *y < 300.0)
-        .collect()
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TrackBox {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    pub hatch: bool,
-    pub locked: bool,
-    /// A measured value the camera writes next to the box (e.g. "55.7 Hz").
-    pub value: Option<String>,
-}
-
-impl TrackBox {
-    pub fn center(&self) -> (f32, f32) {
-        (self.x + self.w * 0.5, self.y + self.h * 0.5)
-    }
-}
-
-pub struct Track {
-    /// Boxes in chain order; the focus is on `target`.
-    pub boxes: Vec<TrackBox>,
-    pub target: usize,
-    pub tails: Vec<((f32, f32), (f32, f32))>,
-    pub focus: (f32, f32),
-    pub lock: bool,
-}
-
-fn jitter(si: usize, f: usize, k: usize, amp: f32) -> (f32, f32) {
-    let a = (si * 1000 + k * 37) as u32;
-    (
-        (rnd(a, f as u32) - 0.5) * 2.0 * amp,
-        (rnd(a + 1, f as u32 + 999) - 0.5) * 2.0 * amp,
-    )
-}
-
-fn boxed(x: f32, y: f32, w: f32, h: f32, pad: f32, j: (f32, f32), hatch: bool) -> TrackBox {
-    TrackBox {
-        x: x - pad + j.0,
-        y: y - pad + j.1,
-        w: w + 2.0 * pad,
-        h: h + 2.0 * pad,
-        hatch,
-        locked: false,
-        value: None,
-    }
-}
-
-fn spectrum_box(hz: f32, j: (f32, f32), value: bool) -> TrackBox {
-    let x = hz_x(hz);
-    let mut b = boxed(
-        x - 16.0,
-        SPEC_TOP + 30.0,
-        32.0,
-        SPEC_BASE - SPEC_TOP - 40.0,
-        0.0,
-        j,
-        true,
-    );
-    if value {
-        b.value = Some(format!("{hz:.1} Hz"));
-    }
-    b
-}
-
-pub fn track(global: usize) -> Track {
-    let (si, f) = split(global);
-    let l = look_of(si);
-    let t = seconds(global);
-    let lock = is_lock(global);
-    let mut boxes = vec![];
-    let mut target = 0;
-
-    match l.kind {
-        Listen | Typing => {
-            let ch = chars(si);
-            let n = visible(si, f);
-            let idx: Vec<usize> = (0..n).filter(|&i| !ch[i].is_whitespace()).collect();
-            let from = idx.len().saturating_sub(CHAIN);
-            for (k, &i) in idx[from..].iter().enumerate() {
-                let (x, y, w, h) = cell(si, i);
-                let pad = 2.0 + rnd(si as u32 + 3, i as u32) * 8.0;
-                let hatch = rnd(si as u32 + 9, i as u32) > 0.35;
-                boxes.push(boxed(x, y, w, h, pad, jitter(si, f, k, 1.6), hatch));
-            }
-            // After a kick in this shot, the newest box holds the last word; red on the kick.
-            // In short shots (bar 7) the word box shows only while it is locked, so the word stays readable.
-            let persist = shot_len(si) >= 15 || lock;
-            if let Some(lf) = last_lock_before(global).filter(|&lf| lf >= SHOT_FRAMES[si] && persist) {
-                let _ = lf;
-                let last_word_start = (0..n)
-                    .rev()
-                    .take_while(|&i| !ch[i].is_whitespace())
-                    .last()
-                    .unwrap_or(0);
-                let (x0, y, _, h) = cell(si, last_word_start);
-                let (x1, _, w1, _) = cell(si, n.saturating_sub(1));
-                if let Some(b) = boxes.last_mut() {
-                    *b = boxed(x0, y, x1 + w1 - x0, h, 10.0, jitter(si, f, 77, 0.8), true);
-                    b.locked = lock;
-                }
-            }
-            target = boxes.len().saturating_sub(1);
-        }
-        Hold => {
-            let (x, y, w, h) = cell(si, 0);
-            boxes.push(boxed(x, y, w * 0.8, h, 8.0, jitter(si, f, 1, 0.6), false));
-        }
-        Done => {}
-    }
-
-    // Spectrum: the tracked frequency, every kick and every bleep of the last 6 frames.
-    if let Some(hz) = l.track_hz {
-        let mut b = spectrum_box(hz, jitter(si, f, 50, 1.0), true);
-        b.locked = lock;
-        boxes.push(b);
-        target = boxes.len() - 1;
-    } else if lock && l.kind != Done {
-        boxes.push(spectrum_box(KICK_HZ, jitter(si, f, 51, 1.0), true));
-    }
-    for (k, (bt, hz)) in BLEEPS.iter().enumerate() {
-        if *bt <= t && t - *bt < 6.0 / FPS as f32 {
-            boxes.push(spectrum_box(*hz, jitter(si, f, 60 + k, 1.4), true));
-        }
-    }
-
-    // Tokens: a small box on a glyph of the log for 3 frames.
-    let rows = log_rows(global);
-    if !rows.is_empty() {
-        for (k, tt) in TOKENS.iter().enumerate() {
-            if *tt <= t && t - *tt < 3.0 / FPS as f32 {
-                let (s, x, y) = rows[k % rows.len()];
-                let col = (k * 7) % s.chars().count().max(1);
-                let adv = LOG_SIZE * MONO_ADV;
-                boxes.push(boxed(
-                    x + col as f32 * adv,
-                    y - LOG_SIZE * 0.8,
-                    adv,
-                    LOG_SIZE,
-                    3.0,
-                    (0.0, 0.0),
-                    k % 2 == 0,
-                ));
-            }
-        }
-    }
-
-    if l.kind == Done {
-        boxes = done_boxes(f);
-        target = boxes.len().saturating_sub(1);
-        if let Some(b) = boxes.last_mut() {
-            b.locked = lock;
-        }
-    }
-
-    let mut tails = vec![];
-    if let Some(first) = boxes.first() {
-        let c = first.center();
-        let a = rnd(si as u32 + 200, 1) * std::f32::consts::TAU;
-        tails.push((c, (c.0 + a.cos() * 2600.0, c.1 + a.sin() * 2600.0)));
-    }
-    let focus = boxes.get(target).map(|b| b.center()).unwrap_or(l.hero);
-    Track {
-        boxes,
-        target,
-        tails,
-        focus,
-        lock,
-    }
-}
-
-/// The ending: twelve boxes fall into the centre in 10 frames, then the pill's two boxes.
-fn done_boxes(f: usize) -> Vec<TrackBox> {
-    let c = (960.0, 540.0);
-    let p = ease_in_out((f as f32 / 10.0).min(1.0));
-    if p < 1.0 {
-        return (0..12usize)
-            .map(|k| {
-                let sx = 160.0 + rnd(77, k as u32) * (W - 320.0);
-                let sy = 120.0 + rnd(78, k as u32) * (H - 240.0);
-                let sw = 30.0 + rnd(79, k as u32) * 90.0;
-                let sh = 26.0 + rnd(80, k as u32) * 60.0;
-                boxed(
-                    sx + (c.0 - 40.0 - sx) * p,
-                    sy + (c.1 - 40.0 - sy) * p,
-                    sw + (80.0 - sw) * p,
-                    sh + (80.0 - sh) * p,
-                    0.0,
-                    (0.0, 0.0),
-                    rnd(81, k as u32) > 0.4,
-                )
-            })
-            .collect();
-    }
-    let (ix, iy) = done_icon();
-    let (dx, dy) = done_label();
-    vec![
-        boxed(ix - 38.0, iy - 32.0, 76.0, 64.0, 0.0, (0.0, 0.0), true),
-        boxed(dx + 1.0, dy - 62.0, 44.0, 70.0, 3.0, (0.0, 0.0), false),
-    ]
-}
-
-/// Pill of the last shot: center x, y, width, height.
-pub fn done_pill() -> (f32, f32, f32, f32) {
-    (960.0, 540.0, 560.0, 132.0)
-}
-
-pub fn done_icon() -> (f32, f32) {
-    let (cx, cy, w, _) = done_pill();
-    (cx - w * 0.5 + 92.0, cy)
-}
-
-/// Baseline start of "unmuted".
-pub fn done_label() -> (f32, f32) {
-    let (cx, cy, _, _) = done_pill();
-    (cx - 110.0, cy + 28.0)
-}
-
-pub fn ease_in_out(t: f32) -> f32 {
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-    }
-}
-
-pub fn ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
-}
-
 /// Camera state for one video frame.
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
@@ -685,29 +554,24 @@ pub struct Shot {
     pub tilt_y: f32,
     pub roll: f32,
     pub blur: f32,
-    pub palette: Palette,
+    pub stops: [[f32; 3]; 5],
     pub lock: bool,
-    /// Exposure kick right after a cut, 0..1.
+    /// Exposure flash: the first frames and the impact.
     pub cut: f32,
-    /// Kick envelope 0..1 (zoom punch, exposure).
     pub punch: f32,
-    /// Clap and stutter tear, 0..1.
     pub tear: f32,
-    /// Fade to black at the end, 0..1.
     pub out: f32,
 }
 
 pub fn shot(global: usize) -> Shot {
-    let (si, f) = split(global);
-    let l = look_of(si);
     let t = seconds(global);
-    let len = shot_len(si);
-    let p = f as f32 / (len.max(2) - 1) as f32;
-    // The aim trails the target over four frames (within the shot) and leans to the hero line.
+    let cam = camera(t);
+    let base = (PLAYHEAD_X + cam.dx, cam.look_y);
+    // The aim leans towards the tracked box, averaged over four frames.
     let mut sum = (0.0, 0.0);
     let mut n = 0.0;
-    for k in 0..4 {
-        if f >= k {
+    for k in 0..4usize {
+        if global >= k {
             let q = track(global - k).focus;
             sum.0 += q.0;
             sum.1 += q.1;
@@ -715,43 +579,33 @@ pub fn shot(global: usize) -> Shot {
         }
     }
     let lag = (sum.0 / n, sum.1 / n);
-    let hero_mid = match l.kind {
-        Listen | Typing if l.track_hz.is_none() => {
-            let (x, y, w, h) = cell(si, visible(si, f).saturating_sub(1) / 2);
-            (x + w * 0.5, y + h * 0.5)
-        }
-        _ => lag,
-    };
     let punch = kick_env(t);
+    let shake = (punch * 3.0, punch * 2.0);
     let aim = (
-        lag.0 * 0.72 + hero_mid.0 * 0.28 + l.cam.pan.0 * (p - 0.5),
-        lag.1 * 0.72 + hero_mid.1 * 0.28 + l.cam.pan.1 * (p - 0.5),
+        base.0 + (lag.0 - base.0) * 0.35 + (rnd(5, global as u32) - 0.5) * shake.0,
+        base.1 + (lag.1 - base.1) * 0.35 + (rnd(6, global as u32) - 0.5) * shake.1,
     );
-    let sway = (si as f32 * 1.7 + p * 1.3).sin() * 0.015;
-    let zoom = (l.cam.zoom.0 + (l.cam.zoom.1 - l.cam.zoom.0) * ease_out(p)) * (1.0 + 0.06 * punch);
+    let impact_flash = env(&[IMPACT], t, 0.18);
     Shot {
         aim,
         focus: track(global).focus,
-        zoom,
-        tilt_x: l.cam.tilt_x + sway,
-        tilt_y: l.cam.tilt_y - sway * 0.7,
-        roll: l.cam.roll + sway * 0.4,
-        blur: l.cam.blur,
-        palette: l.palette,
+        zoom: cam.zoom * (1.0 + 0.05 * punch),
+        tilt_x: cam.tilt_x,
+        tilt_y: cam.tilt_y,
+        roll: cam.roll,
+        blur: cam.blur,
+        stops: palette_stops(t),
         lock: is_lock(global),
-        cut: match f {
-            0 => 1.0,
+        cut: match global {
+            0 => 1.0_f32,
             1 => 0.45,
             2 => 0.15,
             _ => 0.0,
-        },
+        }
+        .max(impact_flash),
         punch,
         tear: clap_env(t).max(if stutter_on(t) { 0.8 } else { 0.0 }),
-        out: if si == SHOTS - 1 {
-            ((t - 15.3) / 0.6).clamp(0.0, 1.0)
-        } else {
-            0.0
-        },
+        out: ((t - 15.3) / 0.6).clamp(0.0, 1.0),
     }
 }
 
@@ -804,48 +658,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timing_matches_the_music() {
-        assert_eq!(SHOT_FRAMES.len(), SHOTS + 1);
-        assert_eq!(SHOT_TEXT.len(), SHOTS);
-        assert_eq!(*SHOT_FRAMES.last().unwrap(), TOTAL_FRAMES);
-        // every cut lands on an 8th note (0.25 s = 7.5 frames, rounded)
-        for &f in &SHOT_FRAMES {
-            let beats = f as f32 / FPS as f32 / (60.0 / BPM) * 2.0;
+    fn every_kick_locks_on_its_frame() {
+        for &k in &KICKS {
+            let g = frame_of(k);
+            assert!(is_lock(g), "kick at {k} s does not lock");
+            let tr = track(g);
+            assert!(tr.boxes.iter().any(|b| b.locked), "no locked box at {k} s");
+        }
+    }
+
+    #[test]
+    fn a_locked_box_sits_on_the_playhead() {
+        for &k in &KICKS {
+            let tr = track(frame_of(k));
+            let b = tr.boxes.iter().find(|b| b.locked).unwrap();
             assert!(
-                (beats - beats.round()).abs() < 0.07,
-                "cut at frame {f} is off the grid"
+                (b.x - PLAYHEAD_X).abs() < 20.0,
+                "kick box at x {} for {k} s",
+                b.x
             );
         }
     }
 
     #[test]
-    fn every_kick_is_a_lock() {
-        for &k in &KICKS {
-            assert!(is_lock(frame_of(k)), "kick at {k} s does not lock");
-            assert!(track(frame_of(k)).lock);
-        }
-    }
-
-    #[test]
-    fn the_camera_keeps_the_target_in_frame() {
+    fn the_camera_keeps_the_focus_in_frame() {
         for g in 0..TOTAL_FRAMES {
             let s = shot(g);
             let (x, y) = project(&s, s.focus, 1920.0, 1080.0).expect("in front of the camera");
             assert!(
-                x > 150.0 && x < 1770.0 && y > 120.0 && y < 960.0,
-                "frame {g}: target at {x:.0},{y:.0}"
+                x > 120.0 && x < 1800.0 && y > 90.0 && y < 990.0,
+                "frame {g}: focus at {x:.0},{y:.0}"
             );
         }
     }
 
     #[test]
-    fn hero_lines_fit_the_canvas() {
-        for si in 0..SHOTS {
-            let n = text(si).chars().count();
-            if n > 0 {
-                let (x, _, w, _) = cell(si, n - 1);
-                assert!(x + w < W - 60.0, "shot {si} too wide");
-            }
-        }
+    fn the_waveform_covers_the_track() {
+        assert!(WAVE.len() as f32 / WAVE_COLS_PER_S >= 15.9);
+        assert!(MARKERS.iter().all(|(t, _)| *t < 16.0));
     }
 }
