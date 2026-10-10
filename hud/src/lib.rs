@@ -92,9 +92,41 @@ pub fn layout_time(global: usize) -> f32 {
     seconds(global).min(IMPACT + STOP_AFTER)
 }
 
+/// Length of the track in seconds.
+pub fn length_s() -> f32 {
+    LENGTH_FRAMES as f32 / FPS as f32
+}
+
+/// The ending has no fixed card: after the impact the view zooms out until the whole track
+/// fits the screen, so the last image is this track's own waveform, notes and locks.
+/// 0 while following the playhead, 1 once the whole track is in view.
+pub fn end_mix(global: usize) -> f32 {
+    ease_in_out(((seconds(global) - IMPACT - 0.25) / 1.1).clamp(0.0, 1.0))
+}
+
+fn follow_x(t: f32, global: usize) -> f32 {
+    PLAYHEAD_X + (t - layout_time(global)) * PX_PER_S
+}
+
+fn full_x(t: f32) -> f32 {
+    LANE_LABEL_W + 30.0 + t / length_s() * (W - LANE_LABEL_W - 80.0)
+}
+
 /// x of a timeline time on the screen at a video frame.
 pub fn time_x(t: f32, global: usize) -> f32 {
-    PLAYHEAD_X + (t - layout_time(global)) * PX_PER_S
+    let e = end_mix(global);
+    follow_x(t, global) + (full_x(t) - follow_x(t, global)) * e
+}
+
+/// Pixels per second of the timeline at a video frame.
+pub fn px_per_s(global: usize) -> f32 {
+    let full = (W - LANE_LABEL_W - 80.0) / length_s();
+    PX_PER_S + (full - PX_PER_S) * end_mix(global)
+}
+
+/// Where the playhead is drawn: fixed while following, at its place in the track at the end.
+pub fn playhead_x(global: usize) -> f32 {
+    time_x(layout_time(global), global)
 }
 
 pub fn fft_y(hz: f32) -> f32 {
@@ -269,6 +301,7 @@ pub fn track(global: usize) -> Track {
             }
             let (rx, ry, rw, rh) = e.rect();
             let x = time_x(e.t, global) + rx;
+            let rw = rw * px_per_s(global) / PX_PER_S;
             let pad = match e.kind {
                 EventKind::Token(_) => 6.0,
                 _ => 5.0 + rnd(k as u32, 3) * 6.0,
@@ -292,7 +325,7 @@ pub fn track(global: usize) -> Track {
             kinds.push(e.kind);
         }
     } else {
-        boxes = done_boxes(global);
+        boxes = memory_boxes(global);
         kinds = vec![EventKind::Impact; boxes.len()];
     }
 
@@ -301,12 +334,12 @@ pub fn track(global: usize) -> Track {
     let target = (0..boxes.len()).rev().find(|&i| {
         let (cx, cy) = boxes[i].center();
         (cy - cam.look_y).abs() < reach
-            && (cx - PLAYHEAD_X).abs() < reach * 1.6
+            && (cx - playhead_x(global)).abs() < reach * 1.6
             && !matches!(kinds[i], EventKind::Token(_))
     });
     let focus = target
         .map(|i| boxes[i].center())
-        .unwrap_or((PLAYHEAD_X, cam.look_y));
+        .unwrap_or((playhead_x(global), cam.look_y));
 
     let mut tails = vec![];
     if let Some(first) = boxes.first() {
@@ -323,60 +356,28 @@ pub fn track(global: usize) -> Track {
     }
 }
 
-/// The ending: twelve boxes fall into the pill in 10 frames, then the pill's two boxes.
-fn done_boxes(global: usize) -> Vec<TrackBox> {
-    let f = global.saturating_sub(frame_of(IMPACT));
-    let (cx, cy, _, _) = done_pill();
-    let p = ease_in_out((f as f32 / 10.0).min(1.0));
-    let b = |x: f32, y: f32, w: f32, h: f32, hatch: bool| TrackBox {
-        x,
-        y,
-        w,
-        h,
-        hatch,
-        locked: false,
-        value: None,
-    };
-    if p < 1.0 {
-        return (0..12usize)
-            .map(|k| {
-                let sx = 200.0 + rnd(77, k as u32) * (W - 400.0);
-                let sy = 160.0 + rnd(78, k as u32) * (H - 320.0);
-                let sw = 30.0 + rnd(79, k as u32) * 90.0;
-                let sh = 26.0 + rnd(80, k as u32) * 60.0;
-                b(
-                    sx + (cx - 40.0 - sx) * p,
-                    sy + (cy - 40.0 - sy) * p,
-                    sw + (80.0 - sw) * p,
-                    sh + (80.0 - sh) * p,
-                    rnd(81, k as u32) > 0.4,
-                )
-            })
-            .collect();
-    }
-    let (ix, iy) = done_icon();
-    let (dx, dy) = done_label();
-    let mut out = vec![
-        b(ix - 38.0, iy - 32.0, 76.0, 64.0, true),
-        b(dx - 4.0, dy - 66.0, 60.0, 76.0, false),
-    ];
-    out[1].value = Some(format!("{} BPM · {:.1} LUFS", BPM as u32, -14.0));
-    out
-}
-
-pub fn done_pill() -> (f32, f32, f32, f32) {
-    (PLAYHEAD_X, WAVE_LANE.mid(), 600.0, 132.0)
-}
-
-pub fn done_icon() -> (f32, f32) {
-    let (cx, cy, w, _) = done_pill();
-    (cx - w * 0.5 + 92.0, cy)
-}
-
-/// Baseline start of "unmuted".
-pub fn done_label() -> (f32, f32) {
-    let (cx, cy, _, _) = done_pill();
-    (cx - 130.0, cy + 28.0)
+/// After the impact: one small box on every kick, clap and the impact, where they sit in the
+/// track. As the view zooms out they become the track's own pattern of locks.
+fn memory_boxes(global: usize) -> Vec<TrackBox> {
+    let scale = px_per_s(global) / PX_PER_S;
+    let f = frame_of(IMPACT);
+    events()
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::Kick | EventKind::Clap | EventKind::Impact))
+        .map(|e| {
+            let (rx, ry, rw, rh) = e.rect();
+            let pad = 3.0 + 3.0 * (1.0 - end_mix(global));
+            TrackBox {
+                x: time_x(e.t, global) + rx - pad,
+                y: ry - pad,
+                w: (rw * scale).max(3.0) + 2.0 * pad,
+                h: rh + 2.0 * pad,
+                hatch: e.kind == EventKind::Impact,
+                locked: e.kind == EventKind::Impact && global >= f && global < f + LOCK_FRAMES,
+                value: (e.kind == EventKind::Impact).then(|| e.value()),
+            }
+        })
+        .collect()
 }
 
 pub fn ease_in_out(t: f32) -> f32 {
@@ -405,8 +406,8 @@ const KEYS: [(f32, f32, f32, f32, f32, f32, f32, f32); 12] = [
     (12.0, 790.0, 2.8, 0.50, 0.30, -0.04, -30.0, 1.3),
     (13.5, 610.0, 3.9, 0.32, 0.10, 0.00, -20.0, 1.5),
     (14.0, 610.0, 3.5, 0.30, 0.00, 0.00, 0.0, 1.4),
-    (15.0, 580.0, 1.35, 0.16, -0.10, 0.02, 0.0, 1.0),
-    (16.0, 580.0, 1.25, 0.12, -0.08, 0.02, 0.0, 1.0),
+    (15.2, 560.0, 1.12, 0.10, -0.06, 0.01, 0.0, 0.6),
+    (16.0, 560.0, 1.06, 0.08, -0.05, 0.01, 0.0, 0.5),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -605,7 +606,7 @@ pub fn shot(global: usize) -> Shot {
         .max(impact_flash),
         punch,
         tear: clap_env(t).max(if stutter_on(t) { 0.8 } else { 0.0 }),
-        out: ((t - 15.3) / 0.6).clamp(0.0, 1.0),
+        out: ((t - 15.5) / 0.45).clamp(0.0, 1.0),
     }
 }
 

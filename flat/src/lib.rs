@@ -62,7 +62,7 @@ impl Video for FlatVideo {
         let t = hud::seconds(g);
         let bands = spectrum(&frame, ctx);
         // After the impact the timeline steps back so the pill can take over.
-        let dim = 1.0 - 0.65 * ((t - hud::IMPACT - 0.15) / 0.3).clamp(0.0, 1.0);
+        let _ = t;
         fframes::svgr!(
             <svg xmlns="http://www.w3.org/2000/svg" width={WIDTH} height={HEIGHT}>
                 <defs>
@@ -75,17 +75,16 @@ impl Video for FlatVideo {
                 </defs>
                 <rect width={WIDTH} height={HEIGHT} fill="#000000" />
                 <g transform={format!("scale({SCALE})")}>
-                    <g opacity={dim}>
+                    <g>
                         {ruler(g)}
                         {markers(g)}
                         {lanes(g)}
                         {waveform(g)}
-                        {fft_strip(&bands)}
+                        {fft_strip(&bands, g)}
                         {lane_labels()}
-                        {playhead()}
+                        {playhead(g)}
                     </g>
                     {chrome(g)}
-                    {done(g)}
                     {tracker(g)}
                 </g>
             </svg>
@@ -133,12 +132,18 @@ fn markers<'a>(g: usize) -> Svgr<'a> {
             let n = text.chars().count();
             let shown = ((now - t) / 0.25 * n as f32).ceil().min(n as f32) as usize;
             let s: String = text.chars().take(shown.max(1)).collect();
-            let w = n as f32 * 26.0 * hud::MONO_ADV + 16.0;
+            // At the end the view holds the whole track: markers shrink, and only the one
+            // picked from the data (its loudest moment) keeps full brightness.
+            let e = hud::end_mix(g);
+            let key = text.starts_with("loudest");
+            let size = 26.0 * (1.0 - 0.45 * e);
+            let w = n as f32 * size * hud::MONO_ADV + 16.0;
+            let opacity = if key { 1.0 } else { 1.0 - 0.6 * e };
             visible(x, w).then(|| {
-                fframes::svgr!(<g>
+                fframes::svgr!(<g opacity={opacity}>
                     <rect x={x} y="58" width="2" height={hud::RULER_Y - 58.0} fill={LIT} />
-                    <rect x={x} y="58" width={w} height="34" fill="#1a1a1a" />
-                    <text x={x + 8.0} y="84" fill={LIT}>{s}</text>
+                    <rect x={x} y="58" width={w} height={8.0 + size} fill="#1a1a1a" />
+                    <text x={x + 8.0} y={62.0 + size * 0.85} font-size={size} fill={LIT}>{s}</text>
                 </g>)
             })
         })
@@ -152,6 +157,7 @@ fn clip<'a>(x: f32, y: f32, w: f32, h: f32, lit: bool) -> Svgr<'a> {
 }
 
 fn lanes<'a>(g: usize) -> Svgr<'a> {
+    let pxs = hud::px_per_s(g);
     let now = hud::seconds(g);
     let mut items: Vec<Svgr> = vec![];
     // lane separators
@@ -161,7 +167,7 @@ fn lanes<'a>(g: usize) -> Svgr<'a> {
     // pad: a block per bar with the chord name, the arp notes inside
     for (t, chord) in hud::CHORDS.iter() {
         let x = hud::time_x(*t, g);
-        let w = 2.0 * hud::PX_PER_S - 6.0;
+        let w = 2.0 * pxs - 6.0;
         if visible(x, w) {
             let lit = *t <= now;
             items.push(fframes::svgr!(<g>
@@ -173,7 +179,7 @@ fn lanes<'a>(g: usize) -> Svgr<'a> {
     for (t, m) in hud::ARP.iter() {
         let x = hud::time_x(*t, g);
         if visible(x, 20.0) {
-            items.push(clip(x, hud::arp_y(*m), 0.1 * hud::PX_PER_S, 6.0, *t <= now));
+            items.push(clip(x, hud::arp_y(*m), 0.1 * pxs, 6.0, *t <= now));
         }
     }
     // kick, clap, hats
@@ -183,7 +189,7 @@ fn lanes<'a>(g: usize) -> Svgr<'a> {
             items.push(clip(
                 x,
                 hud::KICK.top + 6.0,
-                0.12 * hud::PX_PER_S,
+                0.12 * pxs,
                 hud::KICK.h - 12.0,
                 *t <= now,
             ));
@@ -195,7 +201,7 @@ fn lanes<'a>(g: usize) -> Svgr<'a> {
             items.push(clip(
                 x,
                 hud::CLAP.top + 6.0,
-                0.09 * hud::PX_PER_S,
+                0.09 * pxs,
                 hud::CLAP.h - 20.0,
                 *t <= now,
             ));
@@ -220,7 +226,7 @@ fn lanes<'a>(g: usize) -> Svgr<'a> {
             items.push(clip(
                 x,
                 hud::bass_y(*m),
-                0.125 * 1.6 * hud::PX_PER_S - 4.0,
+                0.125 * 1.6 * pxs - 4.0,
                 14.0,
                 *t <= now,
             ));
@@ -233,7 +239,7 @@ fn lanes<'a>(g: usize) -> Svgr<'a> {
             items.push(clip(
                 x,
                 hud::bleep_y(*hz),
-                0.05 * hud::PX_PER_S,
+                0.05 * pxs,
                 12.0,
                 *t <= now,
             ));
@@ -256,20 +262,27 @@ fn lanes<'a>(g: usize) -> Svgr<'a> {
 
 /// Master waveform from music.wav's peaks, bright where the playhead has passed.
 fn waveform<'a>(g: usize) -> Svgr<'a> {
+    let pxs = hud::px_per_s(g);
     let now = hud::seconds(g);
     let mid = hud::WAVE_LANE.mid();
     let half = hud::WAVE_LANE.h * 0.5 - 8.0;
-    let col_w = hud::PX_PER_S / hud::WAVE_COLS_PER_S;
+    // When the view zooms out, columns get thinner than a pixel: merge them in groups and
+    // draw each group's peak, so the waveform stays solid at every zoom.
+    let col_w = pxs / hud::WAVE_COLS_PER_S;
+    let stride = (1.6 / col_w).ceil().max(1.0) as usize;
+    let w = col_w * stride as f32;
     let cols: Vec<Svgr> = hud::WAVE
-        .iter()
+        .chunks(stride)
         .enumerate()
-        .filter_map(|(i, &p)| {
+        .filter_map(|(k, chunk)| {
+            let i = k * stride;
+            let p = chunk.iter().cloned().fold(0.0, f32::max);
             let t = i as f32 / hud::WAVE_COLS_PER_S;
             let x = hud::time_x(t, g);
-            visible(x, col_w).then(|| {
+            visible(x, w).then(|| {
                 let h = 1.0 + p * half;
                 let fill = if t <= now { LIT } else { UNLIT };
-                fframes::svgr!(<rect x={x} y={mid - h} width={col_w - 0.6} height={2.0 * h} fill={fill} />)
+                fframes::svgr!(<rect x={x} y={mid - h} width={(w - 0.6).max(0.8)} height={2.0 * h} fill={fill} />)
             })
         })
         .collect();
@@ -320,7 +333,10 @@ fn spectrum(frame: &Frame, ctx: &FFramesContext) -> Vec<f32> {
         .collect()
 }
 
-fn fft_strip<'a>(bands: &[f32]) -> Svgr<'a> {
+fn fft_strip<'a>(bands: &[f32], g: usize) -> Svgr<'a> {
+    // It belongs to the live playhead: it fades out as the view zooms out to the whole track.
+    let x0 = hud::playhead_x(g) + 8.0;
+    let fade = 1.0 - hud::end_mix(g);
     let n = bands.len().max(1);
     let step = (hud::FFT_BOTTOM - hud::FFT_TOP) / n as f32;
     let bars: Vec<Svgr> = bands
@@ -328,10 +344,10 @@ fn fft_strip<'a>(bands: &[f32]) -> Svgr<'a> {
         .enumerate()
         .map(|(i, &v)| {
             let y = hud::FFT_BOTTOM - (i + 1) as f32 * step + 1.5;
-            fframes::svgr!(<rect x={hud::FFT_X} y={y} width={0.5 + v * hud::FFT_W} height={step - 3.0} fill="#9a9a9a" />)
+            fframes::svgr!(<rect x={x0} y={y} width={0.5 + v * hud::FFT_W} height={step - 3.0} fill="#9a9a9a" />)
         })
         .collect();
-    fframes::svgr!(<g>{bars}</g>)
+    fframes::svgr!(<g opacity={fade}>{bars}</g>)
 }
 
 fn lane_labels<'a>() -> Svgr<'a> {
@@ -348,8 +364,8 @@ fn lane_labels<'a>() -> Svgr<'a> {
     )
 }
 
-fn playhead<'a>() -> Svgr<'a> {
-    let x = hud::PLAYHEAD_X;
+fn playhead<'a>(g: usize) -> Svgr<'a> {
+    let x = hud::playhead_x(g);
     fframes::svgr!(<g>
         <path d={format!("M {} {} l 9 -12 l -18 0 z", x, hud::RULER_Y)} fill={WHITE} />
         <rect x={x - 1.2} y={hud::RULER_Y} width="2.4" height={hud::DATA.top + hud::DATA.h - hud::RULER_Y} fill={WHITE} />
@@ -382,35 +398,6 @@ fn chrome<'a>(g: usize) -> Svgr<'a> {
             <rect x="1250" y="18" width={level.max(0.5)} height="14" fill="#9a9a9a" />
             <rect x="0" y="1012" width={hud::W} height="1" fill={UI_GRAY} />
             <text x="24" y="1046">{status}</text>
-        </g>
-    )
-}
-
-fn done<'a>(g: usize) -> Svgr<'a> {
-    let start = hud::frame_of(hud::IMPACT);
-    if g < start + 8 {
-        return Svgr::empty();
-    }
-    let f = g - start;
-    let (cx, cy, w, h) = hud::done_pill();
-    let (ix, iy) = hud::done_icon();
-    let (lx, ly) = hud::done_label();
-    let grow = hud::ease_out(((f as f32 - 8.0) / 6.0).clamp(0.0, 1.0));
-    let pw = 80.0 + (w - 80.0) * grow;
-    let ph = 80.0 + (h - 80.0) * grow;
-    let label_opacity = ((f as f32 - 11.0) / 4.0).clamp(0.0, 1.0);
-    fframes::svgr!(
-        <g>
-            <rect x={cx - pw * 0.5} y={cy - ph * 0.5} width={pw} height={ph} rx={ph * 0.5}
-                fill="#1d1d1d" stroke={WHITE} stroke-width="4" />
-            <rect x={cx - pw * 0.5 - 14.0} y={cy - ph * 0.5 - 14.0} width={pw + 28.0} height={ph + 28.0} rx={ph * 0.5 + 14.0}
-                fill="none" stroke="#6a6a6a" stroke-width="1.5" />
-            <g opacity={label_opacity}>
-                <circle cx={ix} cy={iy} r="30" fill="#f2f2f2" />
-                <path d={format!("M {} {} l 10 11 l 20 -24", ix - 14.0, iy + 1.0)} fill="none" stroke="#111111"
-                    stroke-width="7" stroke-linecap="round" stroke-linejoin="round" />
-                <text x={lx} y={ly} font-family={MONO} font-weight="700" font-size="80" fill={WHITE}>"unmuted"</text>
-            </g>
         </g>
     )
 }

@@ -152,7 +152,12 @@ COLS_PER_S = 160  # one waveform column per 2 logical px at 320 px/s
 _hop = _w.getframerate() // COLS_PER_S
 _peaks = [float(_np.max(_np.abs(_x[i * _hop : (i + 1) * _hop]))) for i in range(len(_x) // _hop)]
 _norm = max(_peaks) or 1.0
-markers = [(t, s) for t, s in zip(starts, texts) if s]
+# No fixed closing card: the last marker is picked from this track's data, its loudest moment.
+_rms = M["rms_per_frame"][: frame(S.LENGTH)]
+_loud = max(range(len(_rms)), key=lambda i: _rms[i])
+markers = [(t, s) for t, s in zip(starts, texts) if s and s != "✓ unmuted"]
+markers.append((_loud / FPS, f"loudest {_rms[_loud]:.1f} dBFS @ {_loud / FPS:.3f} s"))
+markers.sort(key=lambda m: m[0])
 bars = [(e["t"], e["chord"]) for e in EV if e["kind"] == "bar"]
 out += [
     f"pub const WAVE_COLS_PER_S: f32 = {COLS_PER_S:.1f};\n",
