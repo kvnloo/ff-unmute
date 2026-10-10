@@ -46,7 +46,12 @@ PICTURE: A DAW THAT FOLLOWS ITS PLAYHEAD
   from frame.visualize_audio_frame (S1024, Hann; bin k = k*sr/1024, group into log bands);
   markers on the ruler that type themselves when the playhead reaches them, carrying the
   measured values ("onset 4.000 s", "kick 55.7 Hz", "tempo 120.0 BPM", "-14.0 LUFS"); clips
-  bright once played. The timeline stops 0.35 s after the impact and dims; a "✓ unmuted" pill.
+  bright once played.
+- No fixed closing card: every video must end on its own data. The timeline stops 0.35 s after
+  the impact, then the view zooms out (px per second and the playhead blend to a full-track
+  layout) until the whole track fits the screen; merge waveform columns so they stay solid;
+  boxes stay on every kick, clap and the impact; the FFT strip fades; markers shrink except
+  one picked from the data (the loudest moment from the per-frame RMS).
 - Tracker: a box on every event within 0.55 s behind the playhead; kicks, claps and the impact
   turn red for 2 frames on their exact frame. Labels carry measured values.
 - lens: one SkSL shader films flat.mp4 (bound as iChannel0): tear, perspective (ray vs tilted

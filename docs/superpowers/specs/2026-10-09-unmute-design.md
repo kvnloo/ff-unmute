@@ -88,3 +88,11 @@ the concept, not the picture. The picture was rebuilt, the music stayed bit-iden
 - **Ending:** the timeline stops 0.35 s after the impact and dims; "✓ unmuted" pill.
 
 The structure table above describes the first draft; `hud/src/lib.rs` describes what ships.
+
+## Revision, 2026-10-10 (v1.1.0): an ending made of data
+
+The owner rejected the closing pill: both videos ended on the same kind of button, and every
+video made with this pipeline should end differently, from its own data. The ending is now a
+zoom-out to the whole track (waveform, notes, the boxes on every kick, clap and the impact),
+and the only bright marker is the loudest moment measured from the per-frame RMS
+(`loudest -9.9 dBFS @ 4.500 s` for this track). ff-tracking keeps its "Done" pill.

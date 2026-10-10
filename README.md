@@ -14,7 +14,7 @@ audio. All of it renders with [fframes](https://github.com/dmtrKovalenko/fframes
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
 <a href="https://github.com/mrsarac/ff-unmute/releases/download/v1.0.0/unmute.mp4">
-  <img src="docs/media/hero.webp" width="800" alt="ff-unmute: a tilted close-up of a DAW timeline; the playhead sweeps a real waveform while tracker boxes lock onto kicks, bleeps and tokens; it ends on a green unmuted pill">
+  <img src="docs/media/hero.webp" width="800" alt="ff-unmute: a tilted close-up of a DAW timeline; the playhead sweeps a real waveform while tracker boxes lock onto kicks, bleeps and tokens; it ends on the whole track in one frame">
 </a>
 
 **[🔊 Full 1080p with sound](https://github.com/mrsarac/ff-unmute/releases/download/v1.0.0/unmute.mp4)** (the preview above is silent) ·
@@ -47,6 +47,10 @@ is measured. The picture is cut, lit and tracked from those measurements.
   draws the spectrum strip next to the playhead.
 - **One shot, no cuts.** The camera flies from the waveform to the kick lane, the bass and the
   agent lane, then pulls back. Palettes blend into each other over half a second.
+- **An ending made of its own data.** There is no closing card. After the impact the view
+  zooms out until the whole track fits the screen, so the last frame is this track's waveform,
+  notes and locks. The one marker that stays bright is picked from the measurements: the
+  loudest moment (`loudest -9.9 dBFS @ 4.500 s`). Another score ends on another picture.
 - **Measured, not copied.** The agent's markers on the ruler (`onset 4.000 s`,
   `tempo 120.0 BPM`, `bass 54.8 Hz`, `tokens 54`, `-14.0 LUFS`) come from `music/analyze.py`.
   The analysis listens to the rendered stems, not to the score.
@@ -139,6 +143,13 @@ python3 -I tools/readme_media.py                               # rebuild the ima
   [ff-tracking](https://github.com/mrsarac/ff-tracking) if you want the terminal instead of the DAW.
 - **Or change the prompt.** [`docs/PROMPT.md`](docs/PROMPT.md) is the prompt that makes this
   video with Claude Code. Edit the brief and get your own version.
+
+## Changelog
+
+- **v1.1.0:** the ending is drawn from the data (zoom out to the whole track, last marker
+  picked from the measurements) instead of an "✓ unmuted" pill. The music is bit-identical.
+  The video on X is v1.0.0.
+- **v1.0.0:** first release.
 
 ## Notes from the build
 

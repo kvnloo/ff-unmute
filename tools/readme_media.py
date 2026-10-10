@@ -39,7 +39,7 @@ FLOW = [
     (270, "bar 5  clap, bleeps"),
     (330, "bar 6  tokens"),
     (390, "bar 7  build"),
-    (452, "bar 8  unmuted"),
+    (468, "bar 8  the whole track"),
 ]
 
 
