@@ -13,11 +13,11 @@ audio. All of it renders with [fframes](https://github.com/dmtrKovalenko/fframes
 [![Python synth](https://img.shields.io/badge/music-numpy%20%2B%20scipy-3776ab?logo=python&logoColor=white)](music/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-<a href="https://github.com/mrsarac/ff-unmute/releases/download/v1.0.0/unmute.mp4">
+<a href="https://github.com/mrsarac/ff-unmute/releases/latest/download/unmute.mp4">
   <img src="docs/media/hero.webp" width="800" alt="ff-unmute: a tilted close-up of a DAW timeline; the playhead sweeps a real waveform while tracker boxes lock onto kicks, bleeps and tokens; it ends on the whole track in one frame">
 </a>
 
-**[🔊 Full 1080p with sound](https://github.com/mrsarac/ff-unmute/releases/download/v1.0.0/unmute.mp4)** (the preview above is silent) ·
+**[🔊 Full 1080p with sound](https://github.com/mrsarac/ff-unmute/releases/latest/download/unmute.mp4)** (the preview above is silent) ·
 [On X](https://x.com/0xsarac/status/2108696032603463756) ·
 [How it works](#how-it-works) ·
 [Quick start](#quick-start)
